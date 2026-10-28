@@ -103,8 +103,7 @@ class AtlasView(QWidget):
         self._timer.start()
         self.setMouseTracking(True)
         self.setMinimumWidth(220)
-        self.setMaximumWidth(300)
-        self.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Expanding)
+        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         self.setCursor(Qt.CursorShape.ArrowCursor)
 
     def set_conversation(self, convo: Conversation | None) -> None:
@@ -160,7 +159,7 @@ class AtlasView(QWidget):
         avail_w = max(80.0, self.width() - 46.0)
         dx = max(1.0, maxx - minx)
         dy = max(1.0, maxy - miny)
-        sx = min(avail_w / (dx + 0.35), 76.0)
+        sx = min(avail_w / (dx + 0.35), 120.0)
         sy = min(avail_h / (dy + 0.55), 64.0)
         if sx < 5:
             sx = max(2.0, avail_w / dx)

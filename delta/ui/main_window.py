@@ -15,8 +15,8 @@ import sys
 import time
 from pathlib import Path
 
-from PySide6.QtCore import QByteArray, QPoint, QTimer, Qt, QUrl
-from PySide6.QtGui import QDesktopServices, QGuiApplication, QIcon, QKeySequence, QShortcut
+from PySide6.QtCore import QByteArray, QPoint, QTimer, Qt, QUrl, Signal
+from PySide6.QtGui import QDesktopServices, QGuiApplication, QIcon, QKeySequence, QPainter, QPen, QShortcut
 from PySide6.QtWidgets import (
     QApplication,
     QDialog,
@@ -66,6 +66,59 @@ def _read_user_env_key() -> str:
             return str(value).strip()
     except Exception:
         return ""
+
+
+class _AtlasGrip(QWidget):
+    """A thin drag handle: ATLAS gets wider, the transcript keeps its column."""
+
+    pressed = Signal()
+    moved = Signal(int)
+    released = Signal()
+
+    def __init__(self, parent=None) -> None:
+        super().__init__(parent)
+        self.setFixedWidth(6)
+        self.setCursor(Qt.CursorShape.SizeHorCursor)
+        self.setAttribute(Qt.WidgetAttribute.WA_Hover, True)
+        self.setToolTip("拖动改变 ATLAS 宽度")
+        self._hover = False
+        self._down: QPoint | None = None
+
+    def enterEvent(self, event) -> None:
+        self._hover = True
+        self.update()
+
+    def leaveEvent(self, event) -> None:
+        self._hover = False
+        self.update()
+
+    def mousePressEvent(self, event) -> None:
+        if event.button() != Qt.MouseButton.LeftButton:
+            return
+        self._down = event.globalPosition().toPoint()
+        self.pressed.emit()
+        event.accept()
+
+    def mouseMoveEvent(self, event) -> None:
+        if self._down is None:
+            return
+        self.moved.emit(event.globalPosition().toPoint().x() - self._down.x())
+        event.accept()
+
+    def mouseReleaseEvent(self, event) -> None:
+        if self._down is None:
+            return
+        self._down = None
+        self.released.emit()
+        event.accept()
+
+    def paintEvent(self, event) -> None:
+        if not self._hover:
+            return
+        p = QPainter(self)
+        p.setPen(QPen(color(C.brass, 190), 1))
+        p.drawLine(self.width() // 2, 0, self.width() // 2, self.height())
+        p.end()
 
 
 class MainWindow(QMainWindow):
@@ -169,9 +222,14 @@ class MainWindow(QMainWindow):
         ch.addStretch(1)
         cl.addWidget(self.composer_host, 0, Qt.AlignmentFlag.AlignHCenter)
 
+        self._atlas_w = max(236, min(720, int(self.settings.get("atlas_width") or 258)))
+        self._atlas_w0: int | None = None
+        self.atlas_grip = _AtlasGrip(root)
+        outer.addWidget(self.atlas_grip)
+
         self.atlas_panel = QWidget(root)
         self.atlas_panel.setObjectName("AtlasPanel")
-        self.atlas_panel.setFixedWidth(258)
+        self.atlas_panel.setFixedWidth(self._atlas_w)
         al = QVBoxLayout(self.atlas_panel)
         al.setContentsMargins(0, 0, 0, 0)
         al.setSpacing(0)
@@ -186,6 +244,9 @@ class MainWindow(QMainWindow):
         self.rail.new_requested.connect(self._new_conversation)
         self.rail.sessions_requested.connect(self._open_sessions)
         self.rail.atlas_toggled.connect(self._set_atlas)
+        self.atlas_grip.pressed.connect(self._atlas_resize_start)
+        self.atlas_grip.moved.connect(self._atlas_resize)
+        self.atlas_grip.released.connect(self._atlas_resize_end)
         self.rail.settings_requested.connect(self._show_info)
         self.header.renamed.connect(self._rename)
         self.header.open_data.connect(self._open_data_dir)
@@ -443,6 +504,11 @@ class MainWindow(QMainWindow):
 
     # -- layout --------------------------------------------------------
     def _layout_widths(self) -> None:
+        if self.atlas_panel.isVisible():
+            limit = max(236, self.width() - 500)
+            if self.atlas_panel.width() > limit:
+                self._atlas_w = limit
+                self.atlas_panel.setFixedWidth(limit)
         avail = max(420, self.center.width() - 64)
         total = min(890, avail)
         self.composer_host.setFixedWidth(total)
@@ -495,8 +561,26 @@ class MainWindow(QMainWindow):
         self._schedule_save(120)
         self.toast.show_message("下一条消息将使用新的模型", "ok", 1500)
 
+    def _atlas_resize_start(self) -> None:
+        self._atlas_w0 = self.atlas_panel.width()
+
+    def _atlas_resize(self, dx: int) -> None:
+        if self._atlas_w0 is None:
+            self._atlas_w0 = self.atlas_panel.width()
+        limit = max(320, self.width() - 420)
+        width = max(236, min(limit, self._atlas_w0 - dx))
+        self._atlas_w = width
+        self.atlas_panel.setFixedWidth(width)
+
+    def _atlas_resize_end(self) -> None:
+        self._atlas_w0 = None
+        if self.atlas_panel.isVisible():
+            self.settings["atlas_width"] = self._atlas_w
+            self._persist_settings()
+
     def _set_atlas(self, on: bool, *, save: bool = True) -> None:
         self.atlas_panel.setVisible(on)
+        self.atlas_grip.setVisible(on)
         self.rail.set_atlas(on)
         self.settings["atlas"] = on
         if save:
