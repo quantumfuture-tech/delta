@@ -230,8 +230,12 @@ class DraftStore:
     def from_ui(cls, convo: Conversation) -> "DraftStore":
         store = cls()
         raw = convo.ui.get("slots")
-        if isinstance(raw, dict) and int(raw.get("version", 0)) == cls.VERSION:
-            for item in raw.get("items", []):
+        try:
+            version = int(raw.get("version", 0)) if isinstance(raw, dict) else 0
+        except (TypeError, ValueError):
+            version = 0
+        if version == cls.VERSION:
+            for item in (raw.get("items") or []):
                 if not isinstance(item, dict):
                     continue
                 key = SlotKey.from_json(item.get("key"))

@@ -686,6 +686,14 @@ def test_draft_actions_do_not_write_nodes():
     assert len(c.nodes) == before
 
 
+def test_malformed_slot_document_does_not_break_loading():
+    c, u0, a1, a2, u1, u2, b1, b2 = build()
+    c.ui["slots"] = {"version": "not-a-number", "items": None, "active": {"parent": "gone"}}
+    store = slots.DraftStore.from_ui(c)
+    assert store.active_key(c) == slots.default_key(c)
+    assert isinstance(store.ensure(c, store.active_key(c)).text, str)
+
+
 def test_draft_store_roundtrip_and_prune():
     c, u0, a1, a2, u1, u2, b1, b2 = build()
     store = slots.DraftStore()
