@@ -38,6 +38,8 @@ class TranscriptView(QScrollArea):
         self._rows: list[tuple[str, QWidget]] = []
         self._cards: dict[str, MessageCard] = {}
         self._layers: dict[str, LayerBar] = {}
+        self._open_parent: str | None = None
+        self._open_base: str | None = None
         self._cache: "OrderedDict[str, QWidget]" = OrderedDict()
         self._cache_host = QWidget(self)
         self._cache_host.hide()
@@ -92,6 +94,8 @@ class TranscriptView(QScrollArea):
         self._clear_rows()
         self._cards.clear()
         self._layers.clear()
+        self._open_parent = None
+        self._open_base = None
         self._pending_restore = restore
         self._restore_tries = 0
         self._at_bottom = bool(restore.get("at_bottom", False)) if restore else True
@@ -139,29 +143,10 @@ class TranscriptView(QScrollArea):
         last = len(chain) - 1
         for i, node in enumerate(chain):
             rows.append(("n:" + node.id, ("node", node, i == last)))
-            if self._show_layer(node.id, i == last):
-                active = chain[i + 1].id if i < last else None
-                rows.append(("l:" + node.id, ("layer", node.id, active)))
+            active = chain[i + 1].id if i < last else None
+            compact = len(c.children(node.id)) <= 1
+            rows.append(("l:" + node.id, ("layer", node.id, active, compact)))
         return rows
-
-    def _show_layer(self, parent_id: str, is_leaf: bool) -> bool:
-        """A strip is the entrance to a layer; hide only the single-child detour.
-
-        A single-child layer in the middle of the view uses the card context
-        menu this round; the connected tab form is the next round's visual.
-        The leaf's layer is shown when it has tabs to pick or when the view
-        stops on a question (the + is then the only way to get an answer).
-        """
-        if self.convo is None:
-            return False
-        count = len(self.convo.children(parent_id))
-        if count >= 2:
-            return True
-        if not is_leaf:
-            return False
-        if count >= 1:
-            return True
-        return self.convo.nodes[parent_id].role == "user"
 
     def rebuild(self, *, restore: dict | None = None, keep_bottom: bool | None = None) -> None:
         if self.convo is None:
@@ -221,14 +206,24 @@ class TranscriptView(QScrollArea):
             card.menu_requested.connect(self.menu_requested)
             card.body.typing_started.connect(self.typing_started)
             return card
-        _, parent_id, active = desc
+        _, parent_id, active, compact = desc
+        open_base = self._open_base if self._open_parent == parent_id else None
+        open_tail = self._open_parent == parent_id and self._open_base is None
         if isinstance(cached, LayerBar):
             cached.refresh(active)
+            cached.set_open(open_base, open_tail)
             return cached
         if cached is not None:
             cached.setParent(None)
             cached.deleteLater()
-        bar = LayerBar(self.convo, parent_id, active_child=active)
+        bar = LayerBar(
+            self.convo,
+            parent_id,
+            active_child=active,
+            open_base=open_base,
+            open_tail=open_tail,
+            compact=compact,
+        )
         bar.activate_requested.connect(self.activate_requested)
         bar.tail_slot_requested.connect(self.tail_slot_requested)
         bar.slot_requested.connect(self.slot_requested)
@@ -236,6 +231,16 @@ class TranscriptView(QScrollArea):
         bar.reorder_requested.connect(self.reorder_requested)
         bar.baseline_requested.connect(self.baseline_requested)
         return bar
+
+    def set_open_slot(self, parent_id: str | None, base_id: str | None) -> None:
+        """Mark the tab (or the tail chip) that the input is currently bound to."""
+        self._open_parent = parent_id
+        self._open_base = base_id
+        for bar in self._layers.values():
+            if bar.parent_id == parent_id:
+                bar.set_open(base_id, base_id is None)
+            else:
+                bar.set_open(None, False)
 
     def _refresh_existing(self, spec_prefix: list[tuple]) -> None:
         if self.convo is None:

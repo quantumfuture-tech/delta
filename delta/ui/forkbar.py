@@ -38,6 +38,7 @@ class TabChip(QWidget):
     closed = Signal(str)
     drag_released = Signal(str, QPoint)
     slot_menu_requested = Signal(str, QPoint)
+    slot_requested = Signal(str)
 
     def __init__(
         self,
@@ -45,6 +46,7 @@ class TabChip(QWidget):
         *,
         index: int,
         active: bool,
+        open: bool,
         descendants: int,
         locked: bool,
         parent=None,
@@ -53,6 +55,7 @@ class TabChip(QWidget):
         self.child = child
         self.index = index
         self.active = active
+        self.open = open
         self.descendants = descendants
         self.locked = locked
         self._hover = False
@@ -79,7 +82,7 @@ class TabChip(QWidget):
         if self.locked:
             bits.append("这一层在捷径链上 · 点它查看解锁")
         else:
-            bits.append("点击切换 · 拖动排序 · 右侧 × 关闭")
+            bits.append("点击切换 · 拖动排序 · + 打开这一支的槽 · × 关闭")
         return "\n".join(bits)
 
     @property
@@ -96,7 +99,7 @@ class TabChip(QWidget):
         self._text = _preview(self.child.text if self.child.text.strip() else "（待生成）")
         preview_w = min(154, max(42, self._fm.horizontalAdvance(self._text)))
         desc_w = 22 if self.descendants else 0
-        new_width = 10 + 20 + 8 + preview_w + desc_w + 26
+        new_width = 10 + 20 + 8 + preview_w + desc_w + 52
         if new_width != self._width or self.width() != new_width:
             self._width = new_width
             self.setFixedWidth(new_width)
@@ -138,8 +141,11 @@ class TabChip(QWidget):
             return
         if not self.rect().contains(event.position().toPoint()):
             return
-        if event.position().x() > self.width() - 27:
+        x = event.position().x()
+        if x > self.width() - 27:
             self.closed.emit(self.child.id)
+        elif x > self.width() - 47:
+            self.slot_requested.emit(self.child.id)
         else:
             self.activated.emit(self.child.id)
 
@@ -170,26 +176,40 @@ class TabChip(QWidget):
 
         p.setFont(font(FONT_UI, 9.3))
         p.setPen(color(C.ink if self.active else C.ink_dim))
-        avail = self.width() - 10 - 20 - 8 - (22 if self.descendants else 0) - 26
+        avail = self.width() - 10 - 20 - 8 - (22 if self.descendants else 0) - 52
         text = self._fm.elidedText(self._text, Qt.TextElideMode.ElideRight, max(20, avail))
         p.drawText(QRectF(38, 0, avail, self.height()), Qt.AlignmentFlag.AlignVCenter, text)
 
-        x = self.width() - 18
         if self.descendants:
             p.setFont(font(FONT_MONO, 7.8))
             p.setPen(color(C.faint))
             p.drawText(
-                QRectF(x - 18, 0, 18, self.height()),
+                QRectF(self.width() - 70, 0, 18, self.height()),
                 Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignRight,
                 fmt_count(self.descendants),
             )
-        # the close affordance lives in the slot the pin used to occupy
+        # explicit slot opener (left) and close (right), both on the tab
+        cy = self.height() / 2
+        col = C.ink_dim if self._hover else C.faint
+        p.setPen(QPen(color(col), 1.25))
+        px = self.width() - 34
+        p.drawLine(int(px - 3), int(cy), int(px + 3), int(cy))
+        p.drawLine(int(px), int(cy - 3), int(px), int(cy + 3))
         col = C.ink_dim if (self._hover and not self.locked) else C.line_hi if self._hover else C.faint
         p.setPen(QPen(color(col), 1.25))
-        cx, cy = self.width() - 16, self.height() / 2
+        cx = self.width() - 16
         p.drawLine(int(cx - 3.2), int(cy - 3.2), int(cx + 3.2), int(cy + 3.2))
         p.drawLine(int(cx - 3.2), int(cy + 3.2), int(cx + 3.2), int(cy - 3.2))
+        if self.open:
+            p.setPen(QPen(color(C.brass), 2))
+            p.drawLine(8, int(self.height()) - 2, self.width() - 8, int(self.height()) - 2)
         p.end()
+
+    def set_open(self, open: bool) -> None:
+        if self.open == open:
+            return
+        self.open = open
+        self.update()
 
 
 class AddChip(QWidget):
@@ -198,10 +218,11 @@ class AddChip(QWidget):
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
         self._hover = False
+        self.open = False
         self.setFixedSize(64, 33)
         self.setCursor(Qt.CursorShape.PointingHandCursor)
         self.setAttribute(Qt.WidgetAttribute.WA_Hover, True)
-        self.setToolTip("在这一层新建一支")
+        self.setToolTip("打开这一层的末尾槽")
 
     def enterEvent(self, event) -> None:
         self._hover = True
@@ -219,18 +240,39 @@ class AddChip(QWidget):
         p = QPainter(self)
         p.setRenderHint(QPainter.RenderHint.Antialiasing, True)
         r = QRectF(self.rect()).adjusted(0.5, 0.5, -0.5, -0.5)
-        p.setBrush(color(C.bg))
-        p.setPen(QPen(color(C.line_hi if self._hover else C.line), 1, Qt.PenStyle.DashLine))
+        p.setBrush(color(C.brass if self.open else C.bg))
+        p.setPen(
+            QPen(
+                color(C.brass if self.open else C.line_hi if self._hover else C.line),
+                1.4 if self.open else 1,
+                Qt.PenStyle.SolidLine if self.open else Qt.PenStyle.DashLine,
+            )
+        )
         p.drawRoundedRect(r, 8, 8)
-        draw_icon(p, "plus", QRectF(8, 10, 13, 13), color(C.brass if self._hover else C.muted), 1.6)
-        p.setPen(color(C.ink_dim if self._hover else C.muted))
+        draw_icon(
+            p,
+            "plus",
+            QRectF(8, 10, 13, 13),
+            color(C.bg if self.open else C.brass if self._hover else C.muted),
+            1.6,
+        )
+        p.setPen(color(C.bg if self.open else C.ink_dim if self._hover else C.muted))
         p.setFont(font(FONT_UI, 8.8))
         p.drawText(
             QRectF(26, 0, self.width() - 31, self.height()),
             Qt.AlignmentFlag.AlignVCenter,
             "新支",
         )
+        if self.open:
+            p.setPen(QPen(color(C.brass), 2))
+            p.drawLine(8, int(self.height()) - 2, self.width() - 8, int(self.height()) - 2)
         p.end()
+
+    def set_open(self, open: bool) -> None:
+        if self.open == open:
+            return
+        self.open = open
+        self.update()
 
 
 class _ConfirmButton(PillButton):
@@ -277,19 +319,25 @@ class LayerBar(QWidget):
         parent_id: str,
         *,
         active_child: str | None = None,
+        open_base: str | None = None,
+        open_tail: bool = False,
+        compact: bool = False,
         parent=None,
     ) -> None:
         super().__init__(parent)
         self.convo = convo
         self.parent_id = parent_id
         self.active_child = active_child
+        self._open_base = open_base
+        self._open_tail = open_tail
+        self._compact = compact
         self._chips: list[TabChip] = []
         self._setup()
         self.refresh(active_child)
 
     # -- construction --------------------------------------------------
     def _setup(self) -> None:
-        self.setFixedHeight(72)
+        self.setFixedHeight(48 if self._compact else 72)
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         root = QHBoxLayout(self)
         root.setContentsMargins(0, 0, 0, 0)
@@ -319,6 +367,7 @@ class LayerBar(QWidget):
         tl.addWidget(self._title)
         tl.addWidget(self._hint)
         tl.addStretch(1)
+        top.setVisible(not self._compact)
         self._holder_lay.addWidget(top)
 
         self._body = QWidget(holder)
@@ -393,6 +442,7 @@ class LayerBar(QWidget):
                 child,
                 index=birth.index(child.id) + 1,
                 active=(child.id == active_child),
+                open=(child.id == self._open_base),
                 descendants=self.convo.descendant_count(child.id),
                 locked=layer.is_locked,
                 parent=self._host,
@@ -401,9 +451,11 @@ class LayerBar(QWidget):
             chip.closed.connect(self._on_close)
             chip.drag_released.connect(self._on_drag)
             chip.slot_menu_requested.connect(self._tab_menu)
+            chip.slot_requested.connect(self._on_chip_slot)
             self._row.addWidget(chip)
             self._chips.append(chip)
         self._row.addStretch(1)
+        self._add.set_open(self._open_tail)
         self._host.setMinimumWidth(self._content_width())
         self._title.setText(self._title_text(layer, total))
         self._hint.setText(self._hint_text(layer, total))
@@ -413,6 +465,13 @@ class LayerBar(QWidget):
                     self._scroll.ensureWidgetVisible(chip, 8, 0)
                     break
         self.update()
+
+    def set_open(self, open_base: str | None, open_tail: bool) -> None:
+        self._open_base = open_base
+        self._open_tail = open_tail
+        for chip in self._chips:
+            chip.set_open(chip.child.id == open_base)
+        self._add.set_open(open_tail)
 
     def _content_width(self) -> int:
         widths = [chip.sizeHint().width() for chip in self._chips]
@@ -467,6 +526,12 @@ class LayerBar(QWidget):
     def _on_add(self) -> None:
         # Opening a slot is a draft action, not a layer write: allowed even locked.
         self.tail_slot_requested.emit(self.parent_id)
+
+    def _on_chip_slot(self, child_id: str) -> None:
+        key = slots.SlotKey(self.parent_id, child_id)
+        modes = slots.allowed_modes(self.convo, key)
+        if modes:
+            self.slot_requested.emit(self.parent_id, child_id, modes[0])
 
     def _tab_menu(self, child_id: str, global_pos: QPoint) -> None:
         key = slots.SlotKey(self.parent_id, child_id)

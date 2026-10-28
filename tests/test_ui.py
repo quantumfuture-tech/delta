@@ -577,6 +577,55 @@ def test_tab_row_wheel_scrolls_horizontally(qapp, window):
     assert sb.value() < before
 
 
+def test_tab_plus_opens_that_slot_and_marks_the_tab(qapp, window):
+    c, u0, a1, u1, b1, b2, a2 = seed(window, qapp)
+    bar = window.transcript._layers[u1.id]
+    chip = next(ch for ch in bar._chips if ch.child.id == b2.id)
+    QTest.mouseClick(
+        chip,
+        Qt.MouseButton.LeftButton,
+        Qt.KeyboardModifier.NoModifier,
+        QPoint(chip.width() - 36, 16),
+    )
+    pump(qapp, 60)
+    key = window.drafts.active_key(c)
+    assert key == slots.SlotKey(u1.id, b2.id)
+    assert window.drafts.ensure(c, key).mode == slots.REWRITE_ANSWER
+    chip = next(ch for ch in bar._chips if ch.child.id == b2.id)
+    assert chip.open is True
+    assert bar._add.open is False
+    assert bar._chips[0].open is False
+
+
+def test_single_child_layer_has_a_visible_tab_with_plus_and_close(qapp, window):
+    c, u0, a1, u1, b1, b2, a2 = seed(window, qapp)
+    bar = window.transcript._layers[a1.id]
+    assert bar is not None
+    assert bar.height() == 48
+    assert len(bar._chips) == 1
+    assert bar._add.isVisible()
+    chip = bar._chips[0]
+    QTest.mouseClick(
+        chip,
+        Qt.MouseButton.LeftButton,
+        Qt.KeyboardModifier.NoModifier,
+        QPoint(chip.width() - 36, 16),
+    )
+    pump(qapp, 60)
+    assert window.drafts.active_key(c) == slots.SlotKey(a1.id, u1.id)
+    assert bar._chips[0].open is True
+
+
+def test_tail_chip_has_an_open_state(qapp, window):
+    c, u0, a1, u1, b1, b2, a2 = seed(window, qapp)
+    bar = window.transcript._layers[u1.id]
+    QTest.mouseClick(bar._add, Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier, QPoint(20, 16))
+    pump(qapp, 60)
+    assert window.drafts.active_key(c) == slots.SlotKey(u1.id, None)
+    assert bar._add.open is True
+    assert all(not chip.open for chip in bar._chips)
+
+
 def test_add_chip_opens_a_slot_without_creating(qapp, window):
     c, u0, a1, u1, b1, b2, a2 = seed(window, qapp)
     before = len(c.nodes)

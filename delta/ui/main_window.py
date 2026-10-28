@@ -314,6 +314,7 @@ class MainWindow(QMainWindow):
             and key.base_id in self.convo.nodes
             and self.convo.nodes[key.base_id].role == "user"
         )
+        self.transcript.set_open_slot(key.parent_id, key.base_id)
         self.composer.set_context(len(view_ids))
         self.composer.set_slot_state(
             target,
