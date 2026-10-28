@@ -30,7 +30,7 @@ Raw output: [pytest-output.txt](pytest-output.txt)
 | Context | test_context.py | only the view enters the prompt; reasoning is never sent back; empty placeholders skipped |
 | Persistence | test_store.py | atomic save/load of nodes, defaults, baseline, display order, meta, UI slots; crash mid-stream becomes interrupted; trash; schema 2 on disk |
 | Streaming | test_client.py | SSE content + reasoning; 401/403, 429 + Retry-After, 5xx; timeout; dropped connection; cancellation after partial; malformed events; missing key |
-| UI: layer strip | test_ui.py | one row, fixed height, horizontal scroll on overflow; wheel/Shift+wheel scroll horizontally and are consumed at both ends; each tab has a visible + that opens its slot; open tab and tail chip have an open state; single-child layers show a compact tab with +/×; add opens a slot (no node); close/drag are commands |
+| UI: layer strip | test_ui.py | every layer has the same 72px row (title line + tab row); horizontal scroll on overflow; wheel/Shift+wheel scroll horizontally and are consumed at both ends; each tab has a visible + that opens its slot; open tab and tail chip have an open state; single-child layers keep the labelled row with +/×; add opens a slot (no node); close/drag are commands |
 | UI: slot line | test_ui.py | the target marker shares the tab's number/title/outline; the write-layer label is explicit; off-view turns the marker red and shows locate; locked says the baseline moves first; reset enabled only when dirty |
 | UI: clean drafts | test_ui.py | opening a slot with no text leaves ui.slots empty; typing creates an item; reset removes it again |
 | UI: modes | test_ui.py | answer base switches model/self mode; dirty confirm; one-step undo; per-slot drafts survive switching |
@@ -57,6 +57,6 @@ Raw output: [pytest-output.txt](pytest-output.txt)
 ## Not covered / known
 
 - The visual layer (connected single-child tab, lock affordance, scrollbar look, final slot-row styling) is next round.
-- Single-child layers now have a 48px compact strip, not the connected tab; every layer adds a row, so long conversations scroll longer.
+- Single-child layers keep their own 72px labelled row, not a connected tab; every layer adds a row, so long conversations scroll longer.
 - The current screenshots show behavior, not final visual design.
 - All UI writes go through commands; the one declared repair is RepairEmpty (a streaming placeholder that never received text), also a command with a write layer and a gate.

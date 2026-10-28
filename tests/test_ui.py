@@ -639,7 +639,9 @@ def test_single_child_layer_has_a_visible_tab_with_plus_and_close(qapp, window):
     c, u0, a1, u1, b1, b2, a2 = seed(window, qapp)
     bar = window.transcript._layers[a1.id]
     assert bar is not None
-    assert bar.height() == 48
+    # every layer keeps the same row: a title line and a 33px tab row
+    assert bar.height() == 72
+    assert bar._title.isVisible() and bar._title.text() == "分支 · 1"
     assert len(bar._chips) == 1
     assert bar._add.isVisible()
     chip = bar._chips[0]

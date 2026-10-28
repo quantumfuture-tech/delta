@@ -144,8 +144,7 @@ class TranscriptView(QScrollArea):
         for i, node in enumerate(chain):
             rows.append(("n:" + node.id, ("node", node, i == last)))
             active = chain[i + 1].id if i < last else None
-            compact = len(c.children(node.id)) <= 1
-            rows.append(("l:" + node.id, ("layer", node.id, active, compact)))
+            rows.append(("l:" + node.id, ("layer", node.id, active)))
         return rows
 
     def rebuild(self, *, restore: dict | None = None, keep_bottom: bool | None = None) -> None:
@@ -206,7 +205,7 @@ class TranscriptView(QScrollArea):
             card.menu_requested.connect(self.menu_requested)
             card.body.typing_started.connect(self.typing_started)
             return card
-        _, parent_id, active, compact = desc
+        _, parent_id, active = desc
         open_base = self._open_base if self._open_parent == parent_id else None
         open_tail = self._open_parent == parent_id and self._open_base is None
         if isinstance(cached, LayerBar):
@@ -222,7 +221,6 @@ class TranscriptView(QScrollArea):
             active_child=active,
             open_base=open_base,
             open_tail=open_tail,
-            compact=compact,
         )
         bar.activate_requested.connect(self.activate_requested)
         bar.tail_slot_requested.connect(self.tail_slot_requested)

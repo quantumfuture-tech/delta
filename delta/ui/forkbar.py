@@ -322,7 +322,6 @@ class LayerBar(QWidget):
         active_child: str | None = None,
         open_base: str | None = None,
         open_tail: bool = False,
-        compact: bool = False,
         parent=None,
     ) -> None:
         super().__init__(parent)
@@ -331,14 +330,13 @@ class LayerBar(QWidget):
         self.active_child = active_child
         self._open_base = open_base
         self._open_tail = open_tail
-        self._compact = compact
         self._chips: list[TabChip] = []
         self._setup()
         self.refresh(active_child)
 
     # -- construction --------------------------------------------------
     def _setup(self) -> None:
-        self.setFixedHeight(48 if self._compact else 72)
+        self.setFixedHeight(72)
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         root = QHBoxLayout(self)
         root.setContentsMargins(0, 0, 0, 0)
@@ -368,7 +366,6 @@ class LayerBar(QWidget):
         tl.addWidget(self._title)
         tl.addWidget(self._hint)
         tl.addStretch(1)
-        top.setVisible(not self._compact)
         self._holder_lay.addWidget(top)
 
         self._body = QWidget(holder)
@@ -485,7 +482,7 @@ class LayerBar(QWidget):
             return "继续"
         if total == 1 and self.active_child is None:
             return "未选"
-        return f"分支 · {total}" if total > 1 else "继续"
+        return f"分支 · {total}"
 
     def _hint_text(self, layer, total: int) -> str:
         if layer.is_locked:
