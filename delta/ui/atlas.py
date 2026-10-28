@@ -1,8 +1,20 @@
 """Atlas: the whole tree, fitted into a quiet panel.
 
 The transcript shows one path; this is the only place where the shape of the
-whole conversation is visible at once.  Nodes are dots, forks are diamonds, the
-view is brass.  Clicking a node sets the baseline there; the lock set follows.
+whole conversation is visible at once.  Nodes are dots, forks are diamonds.
+
+What the drawing says
+---------------------
+* solid edge   the default child of its parent (the walk would go there)
+* dashed edge  a sibling that was not made the default
+* thin brass, root -> baseline: the shortcut chain.  Every step is somebody's
+  parent, so it is structural fact, not a choice.
+* thick brass with a soft underglow, baseline -> leaf: the route.  Every step is
+  a default you picked, and this is where you are reading.
+* a bar under the baseline dot, the way a letter sits on its baseline.
+
+Clicking a node sets the baseline there; the lock set follows.  Nothing else
+in here writes.
 """
 from __future__ import annotations
 
@@ -16,6 +28,63 @@ from ..core.model import Conversation, one_line
 from .icons import draw_logo
 from .theme import C, FONT_MONO, FONT_UI, color, font
 from .widgets import fmt_count
+
+SHORTCUT, ROUTE, PLAIN = "shortcut", "route", "plain"
+
+
+def edge_sets(convo: Conversation | None) -> tuple[set[tuple[str, str]], set[tuple[str, str]]]:
+    """(shortcut edges, route edges), each a set of (parent_id, child_id).
+
+    The shortcut is root -> baseline, a chain of parent links.  The route starts
+    at the baseline and follows defaults down to the leaf, so its first edge is
+    (baseline, first default child).
+    """
+    if convo is None or not convo.nodes:
+        return set(), set()
+    shortcut = [n.id for n in convo.shortcut_chain()]
+    route = [n.id for n in convo.route()]
+    s_edges = set(zip(shortcut, shortcut[1:]))
+    r_edges = set(zip([convo.baseline_id] + route, route)) if route else set()
+    return s_edges, r_edges
+
+
+def edge_role(convo: Conversation | None, parent_id: str, child_id: str) -> str:
+    """Which part of the view an edge belongs to: ROUTE, SHORTCUT or PLAIN."""
+    s_edges, r_edges = edge_sets(convo)
+    pair = (parent_id, child_id)
+    if pair in r_edges:
+        return ROUTE
+    if pair in s_edges:
+        return SHORTCUT
+    return PLAIN
+
+
+def edge_is_default(convo: Conversation | None, parent_id: str, child_id: str) -> bool:
+    """True when child is the default child of parent (one per layer)."""
+    parent = convo.nodes.get(parent_id) if convo is not None else None
+    return parent is not None and parent.default_child == child_id
+
+
+def node_tags(convo: Conversation | None, node_id: str) -> list[str]:
+    """Short words for what a node is, in priority order (hover box, tests)."""
+    if convo is None or node_id not in convo.nodes:
+        return []
+    tags: list[str] = []
+    if convo.baseline_id == node_id:
+        tags.append("基准")
+    if convo.view_leaf() == node_id:
+        tags.append("当前")
+    on_shortcut = node_id in {n.id for n in convo.shortcut_chain()}
+    on_route = node_id in {n.id for n in convo.route()}
+    if on_shortcut and convo.baseline_id != node_id:
+        tags.append("捷径链")
+    if on_route:
+        tags.append("路线")
+    if len(convo.children(node_id)) > 1:
+        tags.append("分叉")
+    if not tags:
+        tags.append("分支")
+    return tags
 
 
 class AtlasView(QWidget):
@@ -111,11 +180,6 @@ class AtlasView(QWidget):
         super().resizeEvent(event)
         self._layout_pixels()
 
-    def _active_ids(self) -> set[str]:
-        if self.convo is None:
-            return set()
-        return {n.id for n in self.convo.view()}
-
     def _node_at(self, pos: QPointF) -> str | None:
         best = None
         best_d = 9.5
@@ -148,6 +212,7 @@ class AtlasView(QWidget):
                 self._hover = nid
                 self.node_clicked.emit(nid)
 
+    # -- painting ------------------------------------------------------
     def paintEvent(self, event) -> None:
         p = QPainter(self)
         p.setRenderHint(QPainter.RenderHint.Antialiasing, True)
@@ -156,6 +221,30 @@ class AtlasView(QWidget):
         p.drawLine(self.width() - 1, 0, self.width() - 1, self.height())
         self._layout_pixels()
 
+        self._draw_header(p)
+        if not self._pix:
+            self._draw_empty(p)
+            p.end()
+            return
+
+        self._draw_horizon(p)
+        s_edges, r_edges = edge_sets(self.convo)
+        self._draw_edges(p, s_edges, r_edges)
+        self._draw_nodes(p)
+        self._draw_hover(p)
+        self._draw_legend(p)
+        p.end()
+
+    def _draw_horizon(self, p: QPainter) -> None:
+        """Two short ticks at the baseline's level: fact above it, choice below."""
+        if self.convo is None or self.convo.baseline_id not in self._pix:
+            return
+        pt = self._pix[self.convo.baseline_id]
+        p.setPen(QPen(color(C.brass, 90), 1.0))
+        p.drawLine(QPointF(pt.x() - 27, pt.y()), QPointF(pt.x() - 12, pt.y()))
+        p.drawLine(QPointF(pt.x() + 12, pt.y()), QPointF(pt.x() + 27, pt.y()))
+
+    def _draw_header(self, p: QPainter) -> None:
         p.setFont(font(FONT_MONO, 8.2, 600, 1.5))
         p.setPen(color(C.brass_dim))
         p.drawText(QRectF(22, 22, self.width() - 40, 16), Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter, "ATLAS")
@@ -168,60 +257,111 @@ class AtlasView(QWidget):
             f"{stats.get('nodes', 0)} 节点 · {stats.get('forks', 0)} 分叉",
         )
 
-        if not self._pix:
-            draw_logo(p, QRectF(self.width() / 2 - 25, self.height() / 2 - 120, 50, 50), color(C.line_hi), False)
-            p.setFont(font(FONT_UI, 9.5))
-            p.setPen(color(C.faint))
-            p.drawText(
-                QRectF(20, self.height() / 2 - 58, self.width() - 40, 24),
-                Qt.AlignmentFlag.AlignHCenter,
-                "还没有形状",
-            )
-            p.end()
-            return
+    def _draw_empty(self, p: QPainter) -> None:
+        draw_logo(p, QRectF(self.width() / 2 - 25, self.height() / 2 - 120, 50, 50), color(C.line_hi), False)
+        p.setFont(font(FONT_UI, 9.5))
+        p.setPen(color(C.faint))
+        p.drawText(
+            QRectF(20, self.height() / 2 - 58, self.width() - 40, 24),
+            Qt.AlignmentFlag.AlignHCenter,
+            "还没有形状",
+        )
 
-        active = self._active_ids()
-        chain = self.convo.chain() if self.convo else []
-        active_edges = set()
-        for a, b in zip(chain, chain[1:]):
-            active_edges.add((a.id, b.id))
-        current = self.convo.view_leaf() if self.convo else None
-        forks = {n.id for n in self.convo.nodes.values() if len(self.convo.children(n.id)) > 1} if self.convo else set()
+    def _edge_pen(self, pair: tuple[str, str], s_edges, r_edges) -> QPen:
+        parent_id, child_id = pair
+        default = edge_is_default(self.convo, parent_id, child_id)
+        if pair in r_edges:
+            pen = QPen(color(C.brass, 245), 2.5)
+        elif pair in s_edges:
+            pen = QPen(color(C.ink_dim, 230), 1.7)
+        elif default:
+            pen = QPen(color(C.line_hi, 255), 1.6)
+        else:
+            pen = QPen(color(C.line, 255), 1.1)
+        if not default:
+            pen.setDashPattern([2.4, 4.0])
+        pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+        return pen
 
-        # edges
+    def _edge_path(self, a: QPointF, b: QPointF) -> QPainterPath:
+        path = QPainterPath()
+        path.moveTo(a.x(), a.y() + 2.4)
+        path.cubicTo(a.x(), a.y() + 9, b.x(), b.y() - 9, b.x(), b.y() - 2.2)
+        return path
+
+    def _draw_edges(self, p: QPainter, s_edges, r_edges) -> None:
+        convo = self.convo
+        edges: list[tuple[tuple[str, str], QPainterPath]] = []
         for nid, pt in self._pix.items():
-            node = self.convo.nodes.get(nid) if self.convo else None
+            node = convo.nodes.get(nid) if convo else None
             if node is None:
                 continue
-            x, y = pt.x(), pt.y()
-            for child in self.convo.children(nid):
+            for child in convo.children(nid):
                 to = self._pix.get(child.id)
                 if to is None:
                     continue
-                path = QPainterPath()
-                path.moveTo(x, y + 2.4)
-                path.cubicTo(x, y + 9, to.x(), to.y() - 9, to.x(), to.y() - 2.2)
-                if (nid, child.id) in active_edges:
-                    p.setPen(QPen(color(C.brass, 220), 1.8))
-                else:
-                    p.setPen(QPen(color(C.line), 1.0))
-                p.setBrush(Qt.BrushStyle.NoBrush)
-                p.drawPath(path)
+                edges.append(((nid, child.id), self._edge_path(pt, to)))
 
-        # nodes
+        # the route carries a soft halo; draw every halo first so lines stay crisp
+        glow = QPen(color(C.brass, 18), 10.0)
+        glow.setCapStyle(Qt.PenCapStyle.RoundCap)
+        core = QPen(color(C.brass, 30), 5.2)
+        core.setCapStyle(Qt.PenCapStyle.RoundCap)
+        for pen in (glow, core):
+            for pair, path in edges:
+                if pair in r_edges:
+                    p.setPen(pen)
+                    p.setBrush(Qt.BrushStyle.NoBrush)
+                    p.drawPath(path)
+
+        for pair, path in edges:
+            p.setPen(self._edge_pen(pair, s_edges, r_edges))
+            p.setBrush(Qt.BrushStyle.NoBrush)
+            p.drawPath(path)
+
+    def _draw_nodes(self, p: QPainter) -> None:
+        convo = self.convo
+        if convo is None:
+            return
+        base = convo.baseline_id
+        leaf = convo.view_leaf()
+        on_route = {n.id for n in convo.route()}
+        on_shortcut = {n.id for n in convo.shortcut_chain()}
+        forks = {n.id for n in convo.nodes.values() if len(convo.children(n.id)) > 1}
+
+        def node_ink(nid: str) -> str:
+            if nid == base:
+                return C.brass_hi
+            if nid in on_route:
+                return C.brass
+            if nid in on_shortcut:
+                return C.ink_soft if nid == self._hover else C.ink_dim
+            return C.ink_soft if nid == self._hover else C.faint
+
         for nid, pt in self._pix.items():
-            is_active = nid in active
-            is_current = nid == current
+            is_current = nid == leaf
+            is_base = nid == base
+            is_fork = nid in forks
+
             if is_current:
                 pulse = 9.0 + 1.8 * (0.5 + 0.5 * math.sin(self._phase))
                 p.setPen(Qt.PenStyle.NoPen)
                 p.setBrush(color(C.brass, 24))
                 p.drawEllipse(QRectF(pt.x() - pulse, pt.y() - pulse, pulse * 2, pulse * 2))
-                p.setPen(QPen(color(C.brass, 90), 1))
+                if not is_base:
+                    p.setPen(QPen(color(C.brass, 90), 1))
+                    p.setBrush(Qt.BrushStyle.NoBrush)
+                    p.drawEllipse(QRectF(pt.x() - 6, pt.y() - 6, 12, 12))
+
+            if is_base:
+                p.setPen(QPen(color(C.brass, 235), 1.4))
                 p.setBrush(Qt.BrushStyle.NoBrush)
-                p.drawEllipse(QRectF(pt.x() - 6, pt.y() - 6, 12, 12))
-            if nid in forks:
-                r = 3.8 if not is_active else 4.5
+                p.drawEllipse(QRectF(pt.x() - 6.4, pt.y() - 6.4, 12.8, 12.8))
+                p.setPen(QPen(color(C.brass, 110), 1.0))
+                p.drawEllipse(QRectF(pt.x() - 9.4, pt.y() - 9.4, 18.8, 18.8))
+
+            if is_fork:
+                r = 4.5 if nid in on_route else 3.8
                 path = QPainterPath()
                 path.moveTo(pt.x(), pt.y() - r)
                 path.lineTo(pt.x() + r, pt.y())
@@ -229,54 +369,131 @@ class AtlasView(QWidget):
                 path.lineTo(pt.x() - r, pt.y())
                 path.closeSubpath()
                 p.setPen(QPen(color(C.bg_soft), 1))
-                p.setBrush(color(C.brass if is_active else C.brass_deep if nid == self._hover else C.muted))
+                p.setBrush(color(node_ink(nid)))
                 p.drawPath(path)
             else:
-                r = 2.7 if not is_active else 3.6
+                r = 3.6 if nid in on_route else 2.7
                 if is_current:
                     r = 4.6
+                if is_base:
+                    r = max(r, 4.2)
                 p.setPen(QPen(color(C.bg_soft), 1))
-                p.setBrush(color(C.brass if is_active else C.ink_dim if nid == self._hover else C.faint))
+                p.setBrush(color(node_ink(nid)))
                 p.drawEllipse(QRectF(pt.x() - r, pt.y() - r, r * 2, r * 2))
 
-        # hover preview
-        if self._hover and self._hover in (self.convo.nodes if self.convo else {}):
-            node = self.convo.nodes[self._hover]
-            box = QRectF(16, self.height() - 76, self.width() - 32, 46)
-            p.setPen(QPen(color(C.line), 1))
-            p.setBrush(color(C.panel_hi))
-            p.drawRoundedRect(box, 7, 7)
-            role = "你" if node.role == "user" else "模型"
-            p.setFont(font(FONT_MONO, 7.6, 500, 0.6))
-            p.setPen(color(C.brass if node.role == "user" else C.ink_dim))
-            p.drawText(box.adjusted(9, 5, -9, -30), Qt.AlignmentFlag.AlignLeft, role)
-            p.setFont(font(FONT_UI, 8.4))
-            p.setPen(color(C.ink_dim))
-            fm = QFontMetrics(font(FONT_UI, 8.4))
-            preview = one_line(node.text or "（空）", 58)
-            p.drawText(
-                box.adjusted(9, 18, -9, -5),
-                Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
-                fm.elidedText(preview, Qt.TextElideMode.ElideRight, int(box.width()) - 18),
-            )
 
-        # legend
-        p.setFont(font(FONT_MONO, 7.4, 400, 0.4))
-        ly = self.height() - 24
+    def _draw_hover(self, p: QPainter) -> None:
+        nid = self._hover
+        if not nid or self.convo is None or nid not in self.convo.nodes:
+            return
+        node = self.convo.nodes[nid]
+        box = QRectF(14, self.height() - 132, self.width() - 28, 62)
+        p.setPen(QPen(color(C.line), 1))
+        p.setBrush(color(C.panel_hi))
+        p.drawRoundedRect(box, 7, 7)
+
+        role = "你" if node.role == "user" else "模型"
+        tags = node_tags(self.convo, nid)
+        head = role + (" · " + " · ".join(tags) if tags else "")
+        p.setFont(font(FONT_MONO, 7.6, 500, 0.6))
+        p.setPen(color(C.brass if node.role == "user" else C.ink_dim))
+        p.drawText(
+            QRectF(box.left() + 9, box.top() + 5, box.width() - 18, 14),
+            Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
+            head,
+        )
+
+        p.setFont(font(FONT_UI, 8.4))
+        p.setPen(color(C.ink_dim))
+        fm = QFontMetrics(font(FONT_UI, 8.4))
+        preview = one_line(node.text or "（空）", 58)
+        p.drawText(
+            QRectF(box.left() + 9, box.top() + 21, box.width() - 18, 18),
+            Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
+            fm.elidedText(preview, Qt.TextElideMode.ElideRight, int(box.width()) - 18),
+        )
+
+        p.setFont(font(FONT_MONO, 6.9, 400, 0.3))
+        p.setPen(color(C.muted))
+        p.drawText(
+            QRectF(box.left() + 9, box.top() + 42, box.width() - 18, 12),
+            Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
+            "点击 → 把基准设到这里",
+        )
+
+    def _draw_legend(self, p: QPainter) -> None:
+        f = font(FONT_MONO, 6.8, 400, 0.25)
+        p.setFont(f)
+        fm = QFontMetrics(f)
+        ink = color(C.muted)
+        rows = (self.height() - 56, self.height() - 36, self.height() - 16)
+        col2 = 128.0
+
+        def label(x: float, y: float, text: str) -> float:
+            w = fm.horizontalAdvance(text)
+            p.setPen(ink)
+            p.drawText(
+                QRectF(x, y - 7, w + 2, 14),
+                Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
+                text,
+            )
+            return x + w
+
+        def rule(x: float, y: float, pen: QPen, *, glow: bool = False) -> None:
+            if glow:
+                p.setPen(QPen(color(C.brass, 30), 5.4))
+                p.drawLine(QPointF(x, y), QPointF(x + 14, y))
+            p.setPen(pen)
+            p.drawLine(QPointF(x, y), QPointF(x + 14, y))
+
+        def dot(x: float, y: float) -> None:
+            p.setPen(QPen(color(C.brass, 90), 1))
+            p.setBrush(Qt.BrushStyle.NoBrush)
+            p.drawEllipse(QRectF(x - 5.2, y - 5.2, 10.4, 10.4))
+            p.setPen(Qt.PenStyle.NoPen)
+            p.setBrush(color(C.brass))
+            p.drawEllipse(QRectF(x - 3.0, y - 3.0, 6.0, 6.0))
+
+        route_pen = QPen(color(C.brass, 245), 2.5)
+        route_pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+        dashed = QPen(color(C.line, 255), 1.1)
+        dashed.setDashPattern([2.4, 4.0])
+
+        # column 1: the three line styles
+        rule(21, rows[0], QPen(color(C.ink_dim, 230), 1.7))
+        label(40, rows[0], "捷径 · 结构")
+        rule(21, rows[1], route_pen, glow=True)
+        label(40, rows[1], "路线 · 默认")
+        rule(21, rows[2], dashed)
+        label(40, rows[2], "未选")
+
+        # column 2: the three node marks
+        y = rows[0]
+        p.setPen(QPen(color(C.brass, 90), 1.0))
+        p.drawLine(QPointF(col2 - 9.2, y), QPointF(col2 - 7.0, y))
+        p.drawLine(QPointF(col2 + 7.0, y), QPointF(col2 + 9.2, y))
         p.setPen(Qt.PenStyle.NoPen)
-        p.setBrush(color(C.brass))
-        p.drawEllipse(QRectF(22, ly - 2.5, 5, 5))
-        p.setPen(color(C.faint))
-        p.drawText(QRectF(32, ly - 9, 70, 18), Qt.AlignmentFlag.AlignVCenter, "当前路径")
-        p.setPen(QPen(color(C.brass_deep), 1))
-        p.setBrush(color(C.brass_deep))
-        diamond = QPainterPath()
-        diamond.moveTo(124, ly - 3.2)
-        diamond.lineTo(128, ly)
-        diamond.lineTo(124, ly + 3.2)
-        diamond.lineTo(120, ly)
-        diamond.closeSubpath()
-        p.drawPath(diamond)
-        p.setPen(color(C.faint))
-        p.drawText(QRectF(134, ly - 9, 90, 18), Qt.AlignmentFlag.AlignVCenter, "分叉 / 点击跳转")
-        p.end()
+        p.setBrush(color(C.brass_hi))
+        p.drawEllipse(QRectF(col2 - 2.0, y - 2.0, 4.0, 4.0))
+        p.setPen(QPen(color(C.brass, 235), 1.2))
+        p.setBrush(Qt.BrushStyle.NoBrush)
+        p.drawEllipse(QRectF(col2 - 4.2, y - 4.2, 8.4, 8.4))
+        p.setPen(QPen(color(C.brass, 110), 1.0))
+        p.drawEllipse(QRectF(col2 - 6.2, y - 6.2, 12.4, 12.4))
+        label(col2 + 14, y, "基准")
+
+        y = rows[1]
+        dot(col2, y)
+        label(col2 + 12, y, "当前")
+
+        y = rows[2]
+        d = QPainterPath()
+        d.moveTo(col2, y - 4.2)
+        d.lineTo(col2 + 4.2, y)
+        d.lineTo(col2, y + 4.2)
+        d.lineTo(col2 - 4.2, y)
+        d.closeSubpath()
+        p.setPen(QPen(color(C.bg_soft), 1))
+        p.setBrush(color(C.muted))
+        p.drawPath(d)
+        label(col2 + 12, y, "分叉 · 点击")
