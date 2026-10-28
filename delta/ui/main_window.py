@@ -261,7 +261,7 @@ class MainWindow(QMainWindow):
     def _save_slots(self, ms: int = 300) -> None:
         if not self.convo:
             return
-        self.convo.ui["slots"] = self.drafts.to_ui()
+        self.convo.ui["slots"] = self.drafts.to_ui(self.convo)
         self.convo.ui.pop("draft", None)
         self._schedule_save(ms)
 
@@ -535,7 +535,7 @@ class MainWindow(QMainWindow):
         except Exception:
             pass
         if getattr(self, "drafts", None) is not None:
-            self.convo.ui["slots"] = self.drafts.to_ui()
+            self.convo.ui["slots"] = self.drafts.to_ui(self.convo)
             self.convo.ui.pop("draft", None)
 
     def _open_sessions(self) -> None:

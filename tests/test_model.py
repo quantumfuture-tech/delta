@@ -686,6 +686,27 @@ def test_draft_actions_do_not_write_nodes():
     assert len(c.nodes) == before
 
 
+def test_clean_draft_is_not_persisted_but_still_follows_the_initial():
+    c, u0, a1, a2, u1, u2, b1, b2 = build()
+    store = slots.DraftStore()
+    key = slots.SlotKey(u1.id, b1.id)
+    store.open(c, key, slots.EDIT_ANSWER)
+    clean = store.to_ui(c)
+    assert clean["items"] == []
+    assert clean["active"] is None
+    assert store.ensure(c, key).text == "B1"
+
+    store.set_text(c, key, "manual answer")
+    dirty = store.to_ui(c)
+    assert len(dirty["items"]) == 1
+    assert dirty["active"] == key.to_json()
+
+    store.reset(c, key)
+    clean2 = store.to_ui(c)
+    assert clean2["items"] == []
+    assert clean2["active"] is None
+
+
 def test_malformed_slot_document_does_not_break_loading():
     c, u0, a1, a2, u1, u2, b1, b2 = build()
     c.ui["slots"] = {"version": "not-a-number", "items": None, "active": {"parent": "gone"}}
@@ -700,7 +721,7 @@ def test_draft_store_roundtrip_and_prune():
     key = slots.SlotKey(u1.id, b1.id)
     store.open(c, key, slots.EDIT_ANSWER)
     store.set_text(c, key, "unsent")
-    c.ui["slots"] = store.to_ui()
+    c.ui["slots"] = store.to_ui(c)
     again = slots.DraftStore.from_ui(c)
     assert again.active_key(c) == key
     assert again.ensure(c, key).text == "unsent"

@@ -486,6 +486,26 @@ def test_propose_question_replaces_draft_only(qapp, window):
     assert draft.dirty
 
 
+def test_clean_draft_disappears_from_ui_slots_after_save(qapp, window):
+    c, u0, a1, u1, b1, b2, a2 = seed(window, qapp)
+    window._open_slot(u1.id, b1.id, slots.EDIT_ANSWER)
+    pump(qapp, 40)
+    window._save_slots(0)
+    clean = c.ui["slots"]
+    assert clean["items"] == []
+    assert clean["active"] is None
+    window._draft_changed("manual answer")
+    window._save_slots(0)
+    dirty = c.ui["slots"]
+    assert len(dirty["items"]) == 1
+    assert dirty["active"] is not None
+    window._reset_slot()
+    window._save_slots(0)
+    clean2 = c.ui["slots"]
+    assert clean2["items"] == []
+    assert clean2["active"] is None
+
+
 def test_restart_restores_active_slot_and_draft(qapp, tmp_path):
     store = Store(tmp_path / "restart")
     c = Conversation(title="restart")

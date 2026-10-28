@@ -281,9 +281,20 @@ class DraftStore:
         store.ensure(convo, store.active)
         return store
 
-    def to_ui(self) -> dict[str, Any]:
+    def to_ui(self, convo: Conversation) -> dict[str, Any]:
+        """Persist only drafts that carry information.
+
+        A clean draft whose text is exactly the mode's initial text is
+        indistinguishable from the absence of a draft (the initial text is a
+        pure function).  Keep it in memory, but do not write it to ui.slots.
+        """
         items = []
+        stored: set[SlotKey] = set()
         for key, draft in self.items.items():
+            if not slot_valid(convo, key):
+                continue
+            if not draft.dirty:
+                continue
             items.append(
                 {
                     "key": key.to_json(),
@@ -292,9 +303,11 @@ class DraftStore:
                     "dirty": draft.dirty,
                 }
             )
+            stored.add(key)
+        active = self.active if self.active in stored else None
         return {
             "version": self.VERSION,
-            "active": self.active.to_json() if self.active is not None else None,
+            "active": active.to_json() if active is not None else None,
             "items": items,
         }
 
