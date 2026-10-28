@@ -226,6 +226,17 @@ class AddChip(QWidget):
         p.end()
 
 
+class _ConfirmButton(PillButton):
+    """A focusable pill: Return/Enter activates this button, not the bar."""
+
+    def keyPressEvent(self, event) -> None:
+        if event.key() in (Qt.Key.Key_Return, Qt.Key.Key_Enter):
+            self.click()
+            event.accept()
+            return
+        super().keyPressEvent(event)
+
+
 class _HScroll(QScrollArea):
     def wheelEvent(self, event) -> None:
         pixel = event.pixelDelta()
@@ -336,8 +347,8 @@ class LayerBar(QWidget):
         self._confirm_label.setFont(font(FONT_UI, 8.8))
         self._confirm_label.setStyleSheet(f"color:{C.ink_dim}; background:transparent;")
         self._confirm_label.setTextFormat(Qt.TextFormat.PlainText)
-        self._confirm_cancel = PillButton("取消", self._confirm)
-        self._confirm_ok = PillButton("抬基准", self._confirm, accent=True)
+        self._confirm_cancel = _ConfirmButton("取消", self._confirm)
+        self._confirm_ok = _ConfirmButton("抬基准", self._confirm, accent=True)
         # PillButton is deliberately NoFocus in dialogs; the two-step unlock
         # is the one place where Tab + Enter must work.
         self._confirm_cancel.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
@@ -353,9 +364,6 @@ class LayerBar(QWidget):
         self._esc = QShortcut(QKeySequence("Esc"), self)
         self._esc.setContext(Qt.ShortcutContext.WidgetWithChildrenShortcut)
         self._esc.activated.connect(self._hide_confirm)
-        self._enter = QShortcut(QKeySequence("Return"), self)
-        self._enter.setContext(Qt.ShortcutContext.WidgetWithChildrenShortcut)
-        self._enter.activated.connect(self._enter_pressed)
 
     # -- state ---------------------------------------------------------
     def _clear(self) -> None:
@@ -491,10 +499,6 @@ class LayerBar(QWidget):
         if self._confirm.isVisible():
             self._confirm.hide()
             self._body.show()
-
-    def _enter_pressed(self) -> None:
-        if self._confirm.isVisible():
-            self._confirm_unlock()
 
     def _confirm_unlock(self) -> None:
         self._hide_confirm()
