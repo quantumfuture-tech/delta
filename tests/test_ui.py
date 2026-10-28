@@ -523,6 +523,60 @@ def test_tabs_stay_on_one_row_and_scroll(qapp, window):
     assert bar._scroll.horizontalScrollBar().maximum() > 0
 
 
+class _Wheel:
+    def __init__(self, dy=0, dx=0, mods=Qt.KeyboardModifier.NoModifier):
+        self._angle = QPoint(dx, dy)
+        self._mods = mods
+        self.accepted = False
+        self.ignored = False
+
+    def pixelDelta(self):
+        return QPoint()
+
+    def angleDelta(self):
+        return self._angle
+
+    def modifiers(self):
+        return self._mods
+
+    def accept(self):
+        self.accepted = True
+
+    def ignore(self):
+        self.ignored = True
+
+
+def test_tab_row_wheel_scrolls_horizontally(qapp, window):
+    c = window.convo
+    u0 = helpers.root(c, "root")
+    kids = []
+    for i in range(8):
+        kid = helpers.add(c, u0.id, "assistant", f"tab {i}: " + "preview " * 8)
+        kids.append(kid)
+    helpers.activate(c, u0.id, kids[0].id)
+    window._refresh_stack(); window.transcript.rebuild(); window._refresh_meta()
+    pump(qapp, 160)
+    bar = window.transcript._layers[u0.id]
+    sb = bar._scroll.horizontalScrollBar()
+    assert sb.maximum() > 0
+    ev = _Wheel(-120)
+    bar._scroll.wheelEvent(ev)
+    assert ev.accepted and not ev.ignored
+    assert sb.value() > 0
+    for _ in range(40):
+        bar._scroll.wheelEvent(_Wheel(-120))
+    assert sb.value() == sb.maximum()
+    last = bar._chips[-1]
+    right = last.mapTo(bar._scroll.viewport(), QPoint(last.width(), 0)).x()
+    assert right <= bar._scroll.viewport().width() + 2
+    ev2 = _Wheel(-120)
+    bar._scroll.wheelEvent(ev2)
+    assert ev2.accepted and not ev2.ignored and sb.value() == sb.maximum()
+    before = sb.value()
+    bar._scroll.wheelEvent(_Wheel(+120, mods=Qt.KeyboardModifier.ShiftModifier))
+    assert sb.value() < before
+
+
 def test_add_chip_opens_a_slot_without_creating(qapp, window):
     c, u0, a1, u1, b1, b2, a2 = seed(window, qapp)
     before = len(c.nodes)

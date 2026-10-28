@@ -246,18 +246,16 @@ class _ConfirmButton(PillButton):
 
 class _HScroll(QScrollArea):
     def wheelEvent(self, event) -> None:
+        # The strip always consumes the wheel: vertical wheel, horizontal
+        # wheel and Shift+wheel all scroll the tabs.  At either end the event
+        # is still consumed, so it never falls through to the transcript.
         pixel = event.pixelDelta()
-        bar = self.horizontalScrollBar()
-        if pixel.x():
-            bar.setValue(bar.value() - pixel.x())
-            event.accept()
-            return
         angle = event.angleDelta()
-        if (event.modifiers() & Qt.KeyboardModifier.ShiftModifier) or angle.x():
-            bar.setValue(bar.value() - (angle.x() or angle.y()))
-            event.accept()
-            return
-        super().wheelEvent(event)
+        delta = pixel.x() or pixel.y() or angle.x() or angle.y()
+        if delta:
+            bar = self.horizontalScrollBar()
+            bar.setValue(bar.value() - delta)
+        event.accept()
 
 
 class LayerBar(QWidget):
