@@ -13,6 +13,7 @@ from PySide6.QtCore import (
     QPointF,
     QRectF,
     QSize,
+    QSizeF,
     Qt,
     QTimer,
     QVariantAnimation,
@@ -871,8 +872,15 @@ class LayerBar(QWidget):
         x1 = x0 + chip.width() - 1.0
         floor = tl.y() + chip.height() - 0.5
         foot = 5.0
+        # the feet flare outside the tab; the strip's edges clip them, so the
+        # first/last tab never pokes into the gutter
+        vp = self._scroll.viewport()
+        p.save()
+        p.setClipRect(QRectF(vp.mapTo(self, QPoint(0, 0)), QSizeF(vp.size())))
         p.setPen(QPen(color(C.brass, 210), 1))
         p.setBrush(Qt.BrushStyle.NoBrush)
+        p.drawLine(QPointF(x0, floor - foot), QPointF(x0, floor))
+        p.drawLine(QPointF(x1, floor - foot), QPointF(x1, floor))
         left = QPainterPath()
         left.moveTo(x0, floor - foot)
         left.quadTo(QPointF(x0, floor), QPointF(x0 - foot, floor))
@@ -881,6 +889,7 @@ class LayerBar(QWidget):
         right.moveTo(x1, floor - foot)
         right.quadTo(QPointF(x1, floor), QPointF(x1 + foot, floor))
         p.drawPath(right)
+        p.restore()
         if MOUTH_FLOOR:
             p.setPen(QPen(color(C.line_soft), 1))
             p.drawLine(QPointF(21, floor), QPointF(x0 - foot, floor))
