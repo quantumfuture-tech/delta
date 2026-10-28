@@ -350,10 +350,6 @@ class Conversation:
             return layer
         return self.layer(layer)
 
-    def canonical_leaf(self, node_id: str) -> str:
-        """Backwards-compatible alias for descend_defaults()."""
-        return self.descend_defaults(node_id)
-
     def stats(self) -> dict[str, int]:
         forks = sum(1 for n in self.nodes.values() if len(self.children(n.id)) > 1)
         leaves = sum(1 for n in self.nodes.values() if not self.children(n.id))
