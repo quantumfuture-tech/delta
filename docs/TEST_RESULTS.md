@@ -4,9 +4,9 @@ Command:
 
     & D:\LMY\coding\aichat\_py\Scripts\python.exe -m pytest -q
 
-Result (2026-10-28, Windows 11, Python 3.14.4, PySide6 6.11.1):
+Result (2026-10-29, Windows 11, Python 3.14.4, PySide6 6.12.0):
 
-    124 passed in 19.66s
+    129 passed in 20.61s
 
 Raw output: [pytest-output.txt](pytest-output.txt)
 
@@ -37,7 +37,8 @@ Raw output: [pytest-output.txt](pytest-output.txt)
 | UI: send | test_ui.py | send executes the active slot; new question/answer; rewrite empty = regenerate; rewrite feedback reads the base; self-edit makes no model call; active slot moves to the new view leaf tail |
 | UI: locks | test_ui.py | clicking a locked tab does not switch; confirming raises the baseline; sending on a locked write layer writes nothing and keeps the draft; after unlocking, send again works |
 | UI: proposal | test_ui.py | propose question replaces the draft only; no node; draft dirty |
-| UI: ATLAS | test_ui.py | a click changes only the baseline; reset releases every lock |
+| UI: ATLAS encodings | test_atlas.py | edge roles split at the baseline (root -> baseline is the shortcut, below it the route, siblings are plain); one default edge per layer; node tags for baseline / current / shortcut / branch |
+| UI: ATLAS click | test_ui.py | clicking a node changes the baseline and nothing else: node count, per-layer defaults and display order stay; the lock set is derived from the shortcut chain |
 | UI: incremental | test_ui.py | a switch preserves the exact widget objects in the common prefix; off-screen cards are reused on return |
 | UI: target | test_ui.py | the marker number equals the tab number (02), the title is the tab title, and the same tab is open |
 | UI: restart | test_ui.py | active slot and draft survive close/reopen |
