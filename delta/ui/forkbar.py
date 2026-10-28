@@ -171,7 +171,7 @@ class TabChip(QWidget):
             p.drawRoundedRect(r.adjusted(1, 1, -1, -1), 7, 7)
 
         p.setFont(font(FONT_MONO, 8.0, 500, 0.5))
-        p.setPen(color(C.brass if self.active else C.faint))
+        p.setPen(color(C.brass if (self.active or self.open) else C.faint))
         p.drawText(QRectF(10, 0, 20, self.height()), Qt.AlignmentFlag.AlignVCenter, f"{self.index:02d}")
 
         p.setFont(font(FONT_UI, 9.3))

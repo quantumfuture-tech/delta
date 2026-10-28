@@ -169,6 +169,24 @@ def write_layer(convo: Conversation, key: SlotKey) -> str:
     return ROOT_SCOPE if key.is_root else key.parent_id
 
 
+def target_number(convo: Conversation, key: SlotKey) -> str:
+    if key.base_id is None:
+        return "＋"
+    kids = [n.id for n in convo.children(key.parent_id)]
+    try:
+        return f"{kids.index(key.base_id) + 1:02d}"
+    except ValueError:
+        return "＋"
+
+
+def target_title(convo: Conversation, key: SlotKey) -> str:
+    if key.is_root:
+        return "首条提问"
+    if key.base_id is None:
+        return "末尾"
+    return base_label(convo, key)
+
+
 def can_send(convo: Conversation, key: SlotKey, draft: "Draft") -> bool:
     if not slot_valid(convo, key):
         return False

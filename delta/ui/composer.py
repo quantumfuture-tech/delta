@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import math
 
-from PySide6.QtCore import QPoint, QRectF, Qt, QTimer, Signal, QVariantAnimation
+from PySide6.QtCore import QPoint, QRectF, QSize, Qt, QTimer, Signal, QVariantAnimation
 from PySide6.QtGui import QColor, QFontMetrics, QKeyEvent, QPainter, QPen
 from PySide6.QtWidgets import (
     QHBoxLayout,
@@ -271,6 +271,76 @@ class SendButton(QWidget):
         p.end()
 
 
+class SlotTarget(QWidget):
+    """The mark that points at the tab the input will be written to."""
+
+    def __init__(self, parent=None) -> None:
+        super().__init__(parent)
+        self.number = "＋"
+        self.title = ""
+        self.mode = ""
+        self.offscreen = False
+        self.locked = False
+        self._fm = QFontMetrics(font(FONT_UI, 9.1))
+        self._fm_mode = QFontMetrics(font(FONT_UI, 8.5))
+        self._fm_badge = QFontMetrics(font(FONT_MONO, 8.2, 700, 0.4))
+        self.setFixedHeight(26)
+        self.setMinimumWidth(230)
+        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
+
+    def set_state(self, number: str, title: str, mode: str, *, offscreen: bool, locked: bool) -> None:
+        self.number = number
+        self.title = title
+        self.mode = mode
+        self.offscreen = offscreen
+        self.locked = locked
+        self.setToolTip(f"{number} · {title} · {mode}")
+        self.update()
+
+    def sizeHint(self) -> QSize:
+        return QSize(380, 26)
+
+    def paintEvent(self, event) -> None:
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        border = C.danger if self.offscreen else C.brass_deep if self.locked else C.brass
+        r = QRectF(self.rect()).adjusted(0.5, 0.5, -0.5, -0.5)
+        p.setPen(QPen(color(border), 1.2))
+        p.setBrush(color(C.panel_hi))
+        p.drawRoundedRect(r, 7, 7)
+
+        bw = 30
+        badge = QRectF(5, 4, bw, self.height() - 8)
+        p.setPen(Qt.PenStyle.NoPen)
+        p.setBrush(color(border))
+        p.drawRoundedRect(badge, 5, 5)
+        p.setFont(font(FONT_MONO, 8.2, 700, 0.4))
+        p.setPen(color(C.bg))
+        p.drawText(badge, Qt.AlignmentFlag.AlignCenter, self.number)
+
+        mode = self.mode
+        mode_w = min(130, self._fm_mode.horizontalAdvance(mode))
+        mode_x = self.width() - mode_w - 9
+        p.setFont(font(FONT_UI, 8.5))
+        p.setPen(color(C.danger if self.offscreen else C.brass_dim))
+        p.drawText(
+            QRectF(mode_x, 0, mode_w, self.height()),
+            Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignRight,
+            self._fm_mode.elidedText(mode, Qt.TextElideMode.ElideRight, mode_w),
+        )
+
+        avail = max(20, int(mode_x - (bw + 16)) - 6)
+        p.setFont(font(FONT_UI, 9.1))
+        p.setPen(color(C.ink_dim if not self.offscreen else C.danger))
+        p.drawText(
+            QRectF(bw + 12, 0, avail, self.height()),
+            Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft,
+            self._fm.elidedText(self.title or "（空）", Qt.TextElideMode.ElideRight, avail),
+        )
+        p.end()
+
+
 class Composer(QWidget):
     submit = Signal(str)
     stop = Signal()
@@ -297,16 +367,19 @@ class Composer(QWidget):
         root.setSpacing(0)
 
         self.note = QWidget(self)
-        self.note.setFixedHeight(26)
+        self.note.setFixedHeight(30)
         nl = QHBoxLayout(self.note)
         nl.setContentsMargins(18, 0, 18, 2)
         nl.setSpacing(6)
         self._note_dot = QLabel("●", self.note)
         self._note_dot.setStyleSheet(f"color:{C.brass}; background:transparent; font-size:6pt;")
-        self._note_label = QLabel("", self.note)
-        self._note_label.setStyleSheet(f"color:{C.muted}; background:transparent; font-size:8.6pt;")
-        self._note_label.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
-        self._note_label.setMinimumWidth(90)
+        self._layer_label = QLabel("", self.note)
+        self._layer_label.setStyleSheet(f"color:{C.muted}; background:transparent; font-size:8.4pt;")
+        self._layer_label.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Preferred)
+        self._layer_label.setMinimumWidth(130)
+        self._layer_label.setMaximumWidth(230)
+        self._note_label = self._layer_label
+        self._target = SlotTarget(self.note)
         self._locate_btn = PillButton("定位", self.note)
         self._reset_btn = PillButton("重置", self.note)
         self._mode_btn = PillButton("模式", self.note)
@@ -319,7 +392,8 @@ class Composer(QWidget):
         self._reset_btn.setToolTip("回到当前模式的初始文本")
         self._propose_btn.setToolTip("让模型提议新的问法；结果只替换草稿，不落节点")
         nl.addWidget(self._note_dot)
-        nl.addWidget(self._note_label, 1)
+        nl.addWidget(self._layer_label, 0)
+        nl.addWidget(self._target, 1)
         nl.addWidget(self._locate_btn, 0)
         nl.addWidget(self._propose_btn, 0)
         nl.addWidget(self._reset_btn, 0)
@@ -406,7 +480,10 @@ class Composer(QWidget):
 
     def set_slot_state(
         self,
-        text: str,
+        layer_text: str,
+        number: str,
+        title: str,
+        target_mode: str,
         *,
         offscreen: bool = False,
         locked: bool = False,
@@ -421,13 +498,14 @@ class Composer(QWidget):
         verb: str = "发送",
         edit_enabled: bool = True,
     ) -> None:
-        self._slot_text = text
+        self._slot_text = f"{layer_text} · {number} {title} · {target_mode}"
         self._slot_placeholder = placeholder or "写下你的下一条…"
         self._slot_verb = verb
         self._can_send = can_send
         self._send_reason = send_reason
-        self._note_label.setText(text)
-        self._note_label.setToolTip(text)
+        self._layer_label.setText(layer_text)
+        self._layer_label.setToolTip(layer_text)
+        self._target.set_state(number, title, target_mode, offscreen=offscreen, locked=locked)
         self._locate_btn.setVisible(offscreen)
         self._reset_btn.setEnabled(reset_enabled)
         self._mode_btn.setVisible(show_mode)
@@ -439,7 +517,7 @@ class Composer(QWidget):
             self.hint.setText(f"Enter {verb} · Shift+Enter 换行")
             self.edit.setPlaceholderText(self._slot_placeholder)
         self.send_button.setToolTip(
-            send_reason if not can_send and send_reason else f"{verb} · {text}"
+            send_reason if not can_send and send_reason else f"{verb} · {self._slot_text}"
         )
         self._update_send()
 

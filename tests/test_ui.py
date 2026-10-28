@@ -204,7 +204,7 @@ def test_default_slot_at_a_user_leaf_is_renew_answer(qapp, window):
     assert key == slots.SlotKey(leaf.id, None)
     draft = window.drafts.ensure(c, key)
     assert draft.mode == slots.NEW_ANSWER
-    assert "再生成" in window.composer._note_label.text()
+    assert window.composer._target.mode == "再生成"
     assert slots.can_send(c, key, draft)
     window.client = FakeClient(["answer"])
     window._send("")
@@ -309,8 +309,9 @@ def test_open_tail_slot_shows_write_line_and_reset(qapp, window):
     window._open_tail_slot(a1.id)
     pump(qapp, 40)
     assert len(c.nodes) == keep
-    assert "写：" in window.composer._note_label.text()
-    assert "新提问" in window.composer._note_label.text()
+    assert "写：" in window.composer._layer_label.text()
+    assert window.composer._target.mode == "新提问"
+    assert window.composer._target.number == "＋"
     assert not window.composer._reset_btn.isEnabled()
     type_text(window, "Q2")
     pump(qapp, 30)
@@ -325,19 +326,33 @@ def test_open_base_slot_modes_and_undo(qapp, window, monkeypatch):
     c, u0, a1, u1, b1, b2, a2 = seed(window, qapp)
     window._open_slot(u1.id, b1.id, slots.REWRITE_ANSWER)
     pump(qapp, 40)
-    assert "按意见改" in window.composer._note_label.text()
+    assert window.composer._target.mode == "按意见改"
+    assert window.composer._target.number == "01"
     assert window.composer._mode_btn.isVisible()
     type_text(window, "shorter")
     monkeypatch.setattr(main_window_module, "ConfirmDialog", _DialogStub)
     _DialogStub.result = QDialog.DialogCode.Accepted
     window._switch_slot_mode(slots.EDIT_ANSWER)
     pump(qapp, 40)
-    assert "自己改" in window.composer._note_label.text()
+    assert window.composer._target.mode == "自己改"
     assert window.composer.text() == "B1"
     window._undo_slot_mode()
     pump(qapp, 40)
-    assert "按意见改" in window.composer._note_label.text()
+    assert window.composer._target.mode == "按意见改"
     assert window.composer.text() == "shorter"
+
+
+def test_target_marker_matches_the_tab_number_and_title(qapp, window):
+    c, u0, a1, u1, b1, b2, a2 = seed(window, qapp)
+    window._open_slot(u1.id, b2.id, slots.REWRITE_ANSWER)
+    pump(qapp, 60)
+    assert window.composer._target.number == "02"
+    assert window.composer._target.title.startswith("B2")
+    assert window.composer._target.mode == "按意见改"
+    assert window.composer._layer_label.text().startswith("写：")
+    bar = window.transcript._layers[u1.id]
+    chip = next(ch for ch in bar._chips if ch.child.id == b2.id)
+    assert chip.open is True
 
 
 def test_per_slot_drafts_persist_when_switching(qapp, window):
@@ -358,13 +373,15 @@ def test_offview_write_layer_and_locate(qapp, window):
     type_text(window, "Q1 changed")
     window._set_baseline(a2.id)
     pump(qapp, 60)
-    line = window.composer._note_label.text()
+    line = window.composer._layer_label.text()
     assert "不在当前视图" in line
+    assert window.composer._target.offscreen is True
     assert window.composer._locate_btn.isVisible()
     window._locate_write_layer()
     pump(qapp, 60)
     assert c.baseline_id == a1.id
-    assert "不在当前视图" not in window.composer._note_label.text()
+    assert "不在当前视图" not in window.composer._layer_label.text()
+    assert window.composer._target.offscreen is False
 
 
 def test_locked_send_keeps_draft_and_unlocks_without_writing(qapp, window, monkeypatch):
@@ -373,7 +390,8 @@ def test_locked_send_keeps_draft_and_unlocks_without_writing(qapp, window, monke
     type_text(window, "Q1 changed")
     window._set_baseline(b2.id)
     pump(qapp, 40)
-    assert "执行时先抬基准" in window.composer._note_label.text()
+    assert "执行时先抬基准" in window.composer._layer_label.text()
+    assert window.composer._target.locked is True
     before = len(c.nodes)
     monkeypatch.setattr(main_window_module, "ConfirmDialog", _DialogStub)
     _DialogStub.result = QDialog.DialogCode.Rejected

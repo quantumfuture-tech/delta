@@ -297,15 +297,14 @@ class MainWindow(QMainWindow):
         locked = bool(parent and self.convo.is_locked(parent))
         view_ids = {n.id for n in self.convo.view()}
         offscreen = bool(parent and parent not in view_ids)
-        target = (
-            f"写：{slots.layer_label(self.convo, key)} · "
-            f"{slots.base_label(self.convo, key)} · "
-            f"{slots.MODE_LABEL[draft.mode]}"
-        )
+        layer_text = f"写：{slots.layer_label(self.convo, key)}"
         if locked:
-            target += " · 写层已锁 · 执行时先抬基准"
+            layer_text += " · 写层已锁 · 执行时先抬基准"
         if offscreen:
-            target += " · 不在当前视图"
+            layer_text += " · 不在当前视图"
+        target_number = slots.target_number(self.convo, key)
+        target_title = slots.target_title(self.convo, key)
+        target_mode = slots.MODE_LABEL[draft.mode]
         can = slots.can_send(self.convo, key, draft)
         reason = slots.send_disabled_reason(self.convo, key, draft)
         modes = slots.allowed_modes(self.convo, key)
@@ -317,7 +316,10 @@ class MainWindow(QMainWindow):
         self.transcript.set_open_slot(key.parent_id, key.base_id)
         self.composer.set_context(len(view_ids))
         self.composer.set_slot_state(
-            target,
+            layer_text,
+            target_number,
+            target_title,
+            target_mode,
             offscreen=offscreen,
             locked=locked,
             reset_enabled=draft.dirty and self._proposal_job is None,
