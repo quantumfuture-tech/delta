@@ -2,15 +2,11 @@
 
 Command:
 
-```powershell
-& D:\LMY\coding\aichat\_py\Scripts\python.exe -m pytest -q tests
-```
+    & D:\LMY\coding\aichat\_py\Scripts\python.exe -m pytest -q
 
 Result (2026-10-28, Windows 11, Python 3.14.4, PySide6 6.11.1):
 
-```
-57 passed in 12.93s
-```
+    90 passed in 15.08s
 
 Raw output: [pytest-output.txt](pytest-output.txt)
 
@@ -18,37 +14,35 @@ Raw output: [pytest-output.txt](pytest-output.txt)
 
 | Area | Tests | Guarantee |
 |---|---|---|
-| Tree semantics | `test_model.py` | one root; parent/child; sibling branches; pointer = position; chain = root→pointer; preferred child change touches one node; deletion only on explicit request; retry creates a sibling; stream append is monotonic |
-| Context | `test_context.py` | only the visible chain enters the prompt; reasoning is never sent back; empty placeholders skipped |
-| Persistence | `test_store.py` | atomic save/load of every field (pointer, preferred, text, meta, UI); crash mid-stream becomes `interrupted` with text intact; trash on delete; no temp files; corrupt file is reported |
-| Streaming | `test_client.py` | SSE content + reasoning; 401/403, 429 + Retry-After, 5xx; timeout; dropped connection; cancellation after partial; malformed events; `[DONE]`-less completion; missing key |
-| Incremental UI | `test_ui.py` | a branch switch preserves the exact widget objects in the common prefix; off-screen cards are reused on return; streaming cards refresh when returned; no full list rebuild |
-| Restart | `test_ui.py` | pointer, content and scroll anchor survive close/reopen; same top row and offset within 2 px |
-| Rapid operations | `test_ui.py` | second send while streaming ignored; switching branch mid-stream; stop twice; partial text stays on its own node; a new send works afterwards |
-| Streaming text | `test_markdown.py` | fast draft strips syntax markers but keeps content |
-| Input | `test_ui.py` | Enter sends; Alt+↑/↓ cycles sibling branches; the final markdown re-applies the full stylesheet after streaming |
-| Fork lifecycle | `test_ui.py` | retry completion / interruption / 401 update or remove the placeholder chip without a click; the chip width is recomputed |
-| Destructive UI | `test_ui.py` | accepting the delete dialog removes the node and decrements its parent; rejecting it changes nothing |
-| Role actions | `test_ui.py` | a user card exposes exactly 3 actions and never a retry button; an assistant card exposes 4 |
-| Fork rows | `test_ui.py` | 5 sibling chips keep two rows after initial render, a chip switch, and an upstream jump; every chip stays inside the bar height |
+| View is derived | test_model.py | view = ancestors(descend(baseline)); changing a default or the baseline changes the view; there is no stored path field |
+| Locks are derived | test_model.py | locked layers = layers crossed by root -> baseline; baseline at root => empty lock set; setting the baseline up releases a layer |
+| Four doors | test_model.py | activate / create / close / reorder all raise LayerLocked on the shortcut chain; open layers succeed; no direct public delete |
+| Close | test_model.py | closing the active child activates the next display neighbour, else the previous, else clears the layer; birth order never changes |
+| Converge | test_model.py | the global command writes only the shortcut layers' defaults, keeps the baseline and the view, and is the only write to a locked layer |
+| Defensive delete | test_model.py | removing a subtree that contains the baseline moves it to the nearest surviving ancestor (not reachable through a layer entrance) |
+| Display order | test_model.py | appending, reordering and closing keep birth order; display order is a permutation; the view does not move |
+| Migration | test_migration.py | schema 1 -> 2: the old visible chain becomes the default route; baseline = root; no locks; mid-branch pointer truncates; schema 2 roundtrip |
+| Context | test_context.py | only the view enters the prompt; reasoning is never sent back; empty placeholders skipped |
+| Persistence | test_store.py | atomic save/load of nodes, defaults, baseline, display order, meta, UI; crash mid-stream becomes interrupted; trash; schema 2 on disk |
+| Streaming | test_client.py | SSE content + reasoning; 401/403, 429 + Retry-After, 5xx; timeout; dropped connection; cancellation after partial; malformed events; missing key |
+| UI: layer strip | test_ui.py | one row, fixed height, horizontal scroll on overflow; chips show titles and birth numbers; add/close/drag wired to the same layer actions |
+| UI: locks | test_ui.py | clicking a locked tab does not switch; it opens the inline confirmation; confirming raises the baseline and all four actions work afterwards |
+| UI: ATLAS | test_ui.py | a click changes only the baseline; defaults/texts unchanged; reset releases every lock |
+| UI: incremental | test_ui.py | a switch preserves the exact widget objects in the common prefix; off-screen cards are reused on return |
+| UI: restart | test_ui.py | baseline, content and scroll anchor survive close/reopen within 2 px |
+| UI: rapid | test_ui.py | second send while streaming ignored; switching layers mid-stream; double stop; partial text stays on its own node; a new send works afterwards |
+| UI: no bypass | test_ui.py | a static scan of delta/ui asserts no assignment to default_child / baseline_id / display_order / nodes, and no call to the internal remove/touch helpers |
+| Streaming text | test_markdown.py | fast draft strips syntax markers but keeps content |
 
 ## Acceptance mapping
 
-1. **Real model, streaming, interrupt, no content loss** — live probe: `status=complete`, 4 SSE tokens, 1.05s; UI captures show `LIVE` and `INTERRUPTED · 已保留 147 字`. Interrupt test asserts the partial text is in the node and in the saved JSON.
-2. **Key→char / token→screen** — [BENCH.md](BENCH.md): typing p95 2.43 ms; streaming render p95 9.57 ms; with the 14 ms UI batch, worst typical token path ≈ 23.6 ms (< 2 frames at 60 Hz).
-3. **Reflow limited to affected part** — `test_branch_switch_only_replaces_suffix` asserts prefix widget identity; `test_switch_back_reuses_cached_cards` asserts the returned card object is the same one.
-4. **Restart identical** — `test_restart_restores_pointer_and_scroll`; JSON is atomic; scroll is stored as `(row key, offset)`.
-5. **Rapid operations** — `test_rapid_operations_do_not_crosstalk` plus the double-send and double-stop assertions.
+1. **Real model, streaming, interrupt, no content loss** — live probe on 2026-10-28: status=complete, 4 SSE tokens, 0.84 s, text "分叉很好。"; the UI stream path is covered with a fake client (complete, interrupted, 401), and the partial text is asserted in both the node and the saved JSON.
+2. **Key -> char / token -> screen** — [BENCH.md](BENCH.md): typing p95 2.94 ms; streaming render p95 11.14 ms; the UI batches deltas every 14 ms, so the end-to-end p95 is about 25.1 ms, under two 16.7 ms frames. Layer switch p95 25.83 ms (still under two frames; it rebuilds one strip and the suffix).
+3. **Reflow limited to the affected part** — test_activate_replaces_only_the_suffix asserts prefix identity; test_switch_back_reuses_cached_cards asserts the returned card is the same object.
+4. **Restart identical** — test_restart_restores_baseline_and_scroll; JSON is atomic; the scroll anchor is (row key, offset).
+5. **Rapid operations** — test_rapid_operations_do_not_crosstalk plus the double-send / double-stop assertions.
 
-## Screenshots
+## Not covered this round
 
-- [main.png](screenshots/main.png) — demo conversation, two forks, ATLAS; the lower fork is a completed retry
-- [fork_after_retry.png](screenshots/fork_after_retry.png) — the fork bar after retry completion, no click: both chips show real answer text
-- [fork_two_rows.png](screenshots/fork_two_rows.png) — 5 sibling chips in two rows after switching/upstream; all 5 visible
-- [streaming.png](screenshots/streaming.png) — live token stream, stop affordance
-- [interrupted.png](screenshots/interrupted.png) — partial answer kept after stop
-- [error401.png](screenshots/error401.png) — classified auth error with recovery action
-- [markdown.png](screenshots/markdown.png) — code card, quote, table, headings
-- [empty.png](screenshots/empty.png) — first-run surface
-- [library.png](screenshots/library.png) — conversation library
-- [v1_conventional.png](screenshots/v1_conventional.png) — rejected first version
+- The visual layer (lock affordance, connected single-child tab, scrollbar look) is next round; the single-child layer is reachable through the card context menu for now.
+- Screenshots under docs/screenshots come from the previous round; the two screenshots that showed the removed two-row strip / pin dot were deleted with their scripts.
