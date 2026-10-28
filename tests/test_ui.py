@@ -732,6 +732,33 @@ def test_context_menu_is_the_entrance_for_a_slot(qapp, window, monkeypatch):
     assert "这一层已锁 · 抬基准…" in MenuStub.last.actions
 
 
+def test_atlas_click_moves_only_the_baseline(qapp, window):
+    c, u0, a1, u1, b1, _b2, _ = seed(window, qapp)
+    window.atlas.refresh()
+    window.atlas._layout_pixels()
+    before_defaults = {u0.id: a1.id, a1.id: u1.id, u1.id: b1.id}
+    before_order = {
+        u0.id: c.display_ids(u0.id),
+        a1.id: c.display_ids(a1.id),
+        u1.id: c.display_ids(u1.id),
+    }
+    count = len(c.nodes)
+
+    QTest.mouseClick(window.atlas, Qt.MouseButton.LeftButton, pos=window.atlas._pix[u1.id].toPoint())
+    pump(qapp, 80)
+
+    assert c.baseline_id == u1.id
+    assert len(c.nodes) == count
+    for pid, child in before_defaults.items():
+        active = c.layer(pid).active
+        assert (active.id if active else None) == child
+    for pid, order in before_order.items():
+        assert c.display_ids(pid) == order
+    # locks are derived from the shortcut chain, never written by the click
+    assert c.is_locked(u0.id) and c.is_locked(a1.id)
+    assert c.locked_parent_ids() == {n.parent_id for n in c.shortcut_chain() if n.parent_id}
+
+
 def test_ui_has_no_direct_layer_writes():
     root = Path(__file__).resolve().parents[1] / "delta" / "ui"
     forbidden = [
