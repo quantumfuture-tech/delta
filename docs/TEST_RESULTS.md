@@ -6,7 +6,7 @@ Command:
 
 Result (2026-10-28, Windows 11, Python 3.14.4, PySide6 6.11.1):
 
-    91 passed in 15.67s
+    116 passed in 16.97s
 
 Raw output: [pytest-output.txt](pytest-output.txt)
 
@@ -16,33 +16,43 @@ Raw output: [pytest-output.txt](pytest-output.txt)
 |---|---|---|
 | View is derived | test_model.py | view = ancestors(descend(baseline)); changing a default or the baseline changes the view; there is no stored path field |
 | Locks are derived | test_model.py | locked layers = layers crossed by root -> baseline; baseline at root => empty lock set; setting the baseline up releases a layer |
-| Four doors | test_model.py | activate / create / close / reorder all raise LayerLocked on the shortcut chain; open layers succeed; no direct public delete |
-| Close | test_model.py | closing the active child activates the next display neighbour, else the previous, else clears the layer; birth order never changes |
-| Converge | test_model.py | the global command writes only the shortcut layers' defaults, keeps the baseline and the view, and is the only write to a locked layer |
+| Write scope | test_model.py | a direct layer write outside commands raises ScopeError; a malicious command that writes another layer raises ScopeError; every basic command declares its write layer |
+| Inverses | test_model.py | AddChild -> CloseChild; SetActive/Reorder -> reverse; CloseChild/RepairEmpty/root -> irreversible; composite inverse is declared |
+| Four layer doors | test_model.py | activate / create / close / reorder all raise LayerLocked on the shortcut chain; open layers succeed |
+| Close | test_model.py | closing the active child activates the next display neighbour, else the previous, else clears; birth order never changes |
+| Converge | test_model.py | the global command writes only the shortcut layers' defaults, keeps the baseline and the view; the one global exception |
 | Defensive delete | test_model.py | removing a subtree that contains the baseline moves it to the nearest surviving ancestor (not reachable through a layer entrance) |
 | Display order | test_model.py | appending, reordering and closing keep birth order; display order is a permutation; the view does not move |
+| Slots / drafts | test_model.py | per-slot drafts; dirty/reset; mode switch confirm + one-step undo; clean switch seamless; default and legacy slot mapping; persistence; prune |
+| Slot commands | test_model.py | new question is a 2-step composite with one inverse; new answer is single; revise question keeps the original; rewrite with/without feedback; self-edit is non-model; root writes the root then the answer; declared read ids; can_send rules |
+| Draft actions | test_model.py | reset, mode switch and propose-question-messages write no node |
 | Migration | test_migration.py | schema 1 -> 2: the old visible chain becomes the default route; baseline = root; no locks; mid-branch pointer truncates; schema 2 roundtrip |
 | Context | test_context.py | only the view enters the prompt; reasoning is never sent back; empty placeholders skipped |
-| Persistence | test_store.py | atomic save/load of nodes, defaults, baseline, display order, meta, UI; crash mid-stream becomes interrupted; trash; schema 2 on disk |
+| Persistence | test_store.py | atomic save/load of nodes, defaults, baseline, display order, meta, UI slots; crash mid-stream becomes interrupted; trash; schema 2 on disk |
 | Streaming | test_client.py | SSE content + reasoning; 401/403, 429 + Retry-After, 5xx; timeout; dropped connection; cancellation after partial; malformed events; missing key |
-| UI: layer strip | test_ui.py | one row, fixed height, horizontal scroll on overflow; chips show titles and birth numbers; add/close/drag wired to the same layer actions |
-| UI: locks | test_ui.py | clicking a locked tab does not switch; it opens the inline confirmation; confirming raises the baseline and all four actions work afterwards |
-| UI: ATLAS | test_ui.py | a click changes only the baseline; defaults/texts unchanged; reset releases every lock |
+| UI: layer strip | test_ui.py | one row, fixed height, horizontal scroll on overflow; add opens a slot (no node); close/drag are commands |
+| UI: slot line | test_ui.py | write target + mode above the input; reset enabled only when dirty; locate action; off-view line; locked line says the baseline moves first |
+| UI: modes | test_ui.py | answer base switches model/self mode; dirty confirm; one-step undo; per-slot drafts survive switching |
+| UI: send | test_ui.py | send executes the active slot; new question/answer; rewrite empty = regenerate; rewrite feedback reads the base; self-edit makes no model call; active slot moves to the new view leaf tail |
+| UI: locks | test_ui.py | clicking a locked tab does not switch; confirming raises the baseline; sending on a locked write layer writes nothing and keeps the draft; after unlocking, send again works |
+| UI: proposal | test_ui.py | propose question replaces the draft only; no node; draft dirty |
+| UI: ATLAS | test_ui.py | a click changes only the baseline; reset releases every lock |
 | UI: incremental | test_ui.py | a switch preserves the exact widget objects in the common prefix; off-screen cards are reused on return |
-| UI: restart | test_ui.py | baseline, content and scroll anchor survive close/reopen within 2 px |
-| UI: rapid | test_ui.py | second send while streaming ignored; switching layers mid-stream; double stop; partial text stays on its own node; a new send works afterwards |
-| UI: no bypass | test_ui.py | a static scan of delta/ui asserts no assignment to default_child / baseline_id / display_order / nodes, and no call to the internal remove/touch helpers |
+| UI: restart | test_ui.py | active slot and draft survive close/reopen |
+| UI: rapid | test_ui.py | second send while streaming ignored; switching layers mid-stream; double stop; partial text stays on its own node |
+| UI: no bypass | test_ui.py | a static scan of delta/ui asserts no direct layer write, no raw scope call, no direct convo.create/activate/close/reorder/send/ask/answer/abandon, no old API names |
 | Streaming text | test_markdown.py | fast draft strips syntax markers but keeps content |
 
 ## Acceptance mapping
 
-1. **Real model, streaming, interrupt, no content loss** — live probe on 2026-10-28: status=complete, 4 SSE tokens, 0.84 s, text "分叉很好。"; the UI stream path is covered with a fake client (complete, interrupted, 401), and the partial text is asserted in both the node and the saved JSON.
-2. **Key -> char / token -> screen** — [BENCH.md](BENCH.md): typing p95 2.94 ms; streaming render p95 11.14 ms; the UI batches deltas every 14 ms, so the end-to-end p95 is about 25.1 ms, under two 16.7 ms frames. Layer switch p95 25.83 ms (still under two frames; it rebuilds one strip and the suffix).
+1. **Real model, streaming, interrupt, no content loss** — previous live probe: status=complete, 4 SSE tokens, 0.84 s; the UI stream path is covered with a fake client (complete, interrupted, 401), and partial text is asserted in both the node and the saved JSON.
+2. **Key -> char / token -> screen** — [BENCH.md](BENCH.md): typing p95 7.76 ms; streaming render p95 8.56 ms; the UI batches deltas every 14 ms, so the end-to-end p95 is about 22.6 ms, under two 16.7 ms frames. Layer switch p95 15.83 ms after a warm-up.
 3. **Reflow limited to the affected part** — test_activate_replaces_only_the_suffix asserts prefix identity; test_switch_back_reuses_cached_cards asserts the returned card is the same object.
-4. **Restart identical** — test_restart_restores_baseline_and_scroll; JSON is atomic; the scroll anchor is (row key, offset).
-5. **Rapid operations** — test_rapid_operations_do_not_crosstalk plus the double-send / double-stop assertions.
+4. **Restart identical** — test_restart_restores_active_slot_and_draft; JSON is atomic; the scroll anchor is (row key, offset); the active slot/draft are versioned in ui.slots.
+5. **Rapid operations** — test_rapid_operations_do_not_crosstalk plus double-send/double-stop assertions.
 
-## Not covered this round
+## Not covered / known
 
-- The visual layer (lock affordance, connected single-child tab, scrollbar look) is next round; the single-child layer is reachable through the card context menu for now.
-- Screenshots under docs/screenshots come from the previous round; the two screenshots that showed the removed two-row strip / pin dot were deleted with their scripts.
+- The visual layer (connected single-child tab, lock affordance, scrollbar look, slot-row styling) is next round.
+- The current screenshots show behavior, not final visual design.
+- All UI writes go through commands; the one declared repair is RepairEmpty (a streaming placeholder that never received text), also a command with a write layer and a gate.

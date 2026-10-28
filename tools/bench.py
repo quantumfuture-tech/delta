@@ -74,6 +74,11 @@ b1 = commands.add_child(c, a.id, "user", "右支：从成本看")
 b2 = commands.add_child(c, b1.id, "assistant", "右支的回答。" * 8, status="complete")
 commands.set_active(c, a.id, u2.id)
 w.transcript.rebuild(); w._refresh_meta(); pump(120)
+# one warm-up switch so the first measured switch is not paying cold layout
+w._activate(a.id, b1.id)
+pump(80)
+w._activate(a.id, u2.id)
+pump(80)
 switches = []
 for i in range(20):
     target = b1.id if i % 2 == 0 else u2.id
@@ -93,6 +98,6 @@ Path("D:/LMY/coding/aichat/a/docs/BENCH.md").write_text(
     "- typing (key -> composer paint): p50 %.2f ms, p95 %.2f ms, max %.2f ms\n" % (pct(typing,.5), pct(typing,.95), max(typing)) +
     "- streaming token batch (5 chars -> incremental draft append + body paint): p50 %.2f ms, p95 %.2f ms, max %.2f ms\n" % (pct(chunks,.5), pct(chunks,.95), max(chunks)) +
     "- layer switch (prefix diff + rebuild suffix): p50 %.2f ms, p95 %.2f ms, max %.2f ms\n" % (pct(switches,.5), pct(switches,.95), max(switches)) +
-    "\nMethod: one warm-up key sequence and one warm-up streaming append precede the measurements; 160 injected key events with an immediate repaint of the composer; 70 streaming batches of 5 Chinese characters appended to an in-flight card with an immediate repaint; 20 alternating layer switches. Real deltas are batched by the app on a 14 ms timer, so the end-to-end p95 is about 14 ms plus the render number above. Layer switches alternate between two already-rendered layers, so the card cache is exercised; the first visit to an unseen layer additionally renders its cards.\n"
+    "\nMethod: one warm-up key sequence, one warm-up streaming append, and one warm-up layer switch precede the measurements; 160 injected key events with an immediate repaint of the composer; 70 streaming batches of 5 Chinese characters appended to an in-flight card with an immediate repaint; 20 alternating layer switches. Real deltas are batched by the app on a 14 ms timer, so the end-to-end p95 is about 14 ms plus the render number above. Layer switches alternate between two already-rendered layers, so the card cache is exercised; the first visit to an unseen layer additionally renders its cards.\n"
 )
 w._save_now(); w.close()
