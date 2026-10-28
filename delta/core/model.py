@@ -206,6 +206,15 @@ class Conversation:
     * no cycles
     * baseline_id is None iff the tree is empty, otherwise a node id
 
+    Writers
+    -------
+    * active child of a layer: activate, create(activate=True), send/ask/answer,
+      close (the next display neighbour takes over), converge (global exception)
+    * structure: create, close, abandon (an empty streaming placeholder only)
+    * display order: reorder
+    * baseline: set_baseline in normal operation; from_dict / schema migration
+      and the defensive delete-repair path assign it directly
+
     Nothing except append_stream / finish_node changes a node's text, and
     those are the mechanics of writing a *new* message.  Removal happens only
     through close() or the internal repair helper, and it is always explicit.
