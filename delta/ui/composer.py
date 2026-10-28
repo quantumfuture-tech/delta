@@ -18,7 +18,7 @@ from PySide6.QtWidgets import (
 from ..core.model import DEFAULT_MODEL, MODELS
 from .icons import draw_icon
 from .theme import C, FONT_MONO, FONT_UI, color, font
-from .widgets import IconButton
+from .widgets import IconButton, PillButton
 
 
 MODEL_NAMES = {
@@ -277,13 +277,19 @@ class Composer(QWidget):
     draft_changed = Signal(str)
     model_changed = Signal(str)
     height_changed = Signal()
+    locate_clicked = Signal()
+    reset_clicked = Signal()
+    mode_clicked = Signal()
+    propose_clicked = Signal()
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
         self._busy = False
-        self._note_kind = ""
-        self._leaf_role = ""
-        self._pending_title = ""
+        self._can_send = False
+        self._send_reason = ""
+        self._slot_text = ""
+        self._slot_placeholder = "写下你的下一条…"
+        self._slot_verb = "发送"
         self.setMaximumWidth(890)
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         root = QVBoxLayout(self)
@@ -291,18 +297,36 @@ class Composer(QWidget):
         root.setSpacing(0)
 
         self.note = QWidget(self)
-        self.note.setFixedHeight(20)
+        self.note.setFixedHeight(26)
         nl = QHBoxLayout(self.note)
-        nl.setContentsMargins(18, 0, 18, 3)
+        nl.setContentsMargins(18, 0, 18, 2)
         nl.setSpacing(6)
         self._note_dot = QLabel("●", self.note)
         self._note_dot.setStyleSheet(f"color:{C.brass}; background:transparent; font-size:6pt;")
         self._note_label = QLabel("", self.note)
         self._note_label.setStyleSheet(f"color:{C.muted}; background:transparent; font-size:8.6pt;")
+        self._note_label.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
+        self._note_label.setMinimumWidth(90)
+        self._locate_btn = PillButton("定位", self.note)
+        self._reset_btn = PillButton("重置", self.note)
+        self._mode_btn = PillButton("模式", self.note)
+        self._propose_btn = PillButton("让模型改问法", self.note)
+        self._locate_btn.clicked.connect(self.locate_clicked)
+        self._reset_btn.clicked.connect(self.reset_clicked)
+        self._mode_btn.clicked.connect(self.mode_clicked)
+        self._propose_btn.clicked.connect(self.propose_clicked)
+        self._locate_btn.setToolTip("把基准抬到这一层的 parent")
+        self._reset_btn.setToolTip("回到当前模式的初始文本")
+        self._propose_btn.setToolTip("让模型提议新的问法；结果只替换草稿，不落节点")
         nl.addWidget(self._note_dot)
-        nl.addWidget(self._note_label)
-        nl.addStretch(1)
-        self.note.setVisible(False)
+        nl.addWidget(self._note_label, 1)
+        nl.addWidget(self._locate_btn, 0)
+        nl.addWidget(self._propose_btn, 0)
+        nl.addWidget(self._reset_btn, 0)
+        nl.addWidget(self._mode_btn, 0)
+        self._locate_btn.hide()
+        self._propose_btn.hide()
+        self._mode_btn.hide()
         root.addWidget(self.note)
 
         self.panel = ComposerPanel(self)
@@ -357,78 +381,67 @@ class Composer(QWidget):
 
     def clear(self) -> None:
         self.set_text("")
-        self._adjust_height()
-        self._update_send()
 
     def set_busy(self, busy: bool) -> None:
         self._busy = busy
         self.panel.set_busy(busy)
-        self.send_button.set_mode("stop" if busy else ("send" if self.text().strip() else "disabled"))
-        self.hint.setText("Esc 停止生成 · 可继续输入" if busy else "Enter 发送 · Shift+Enter 换行")
-        self._update_note()
-        self.edit.setPlaceholderText(
-            "正在生成…（可以先写下下一条）" if busy else self._placeholder_text()
+        self.hint.setText(
+            "Esc 停止 · 已收到的内容保留"
+            if busy
+            else f"Enter {self._slot_verb} · Shift+Enter 换行"
         )
+        self.edit.setPlaceholderText(
+            "正在生成…（可以先写下下一条）" if busy else self._slot_placeholder
+        )
+        self._update_send()
+
+    def set_edit_enabled(self, enabled: bool) -> None:
+        self.edit.setReadOnly(not enabled)
 
     def set_model(self, model: str) -> None:
         self.model_chip.set_model(model)
 
-    def set_context(
+    def set_context(self, count: int) -> None:
+        self.context_label.setText(f"{count} 条上下文" if count else "")
+
+    def set_slot_state(
         self,
-        count: int,
-        layer_count: int = 0,
-        leaf_role: str = "",
-        pending_title: str = "",
-        busy_elsewhere: bool = False,
+        text: str,
+        *,
+        offscreen: bool = False,
+        locked: bool = False,
+        reset_enabled: bool = False,
+        mode_label: str = "",
+        show_mode: bool = False,
+        show_propose: bool = False,
+        propose_enabled: bool = False,
+        can_send: bool = False,
+        send_reason: str = "",
+        placeholder: str = "",
+        verb: str = "发送",
+        edit_enabled: bool = True,
     ) -> None:
-        self._context_count = count
-        self._has_children = layer_count > 1
-        self._child_count = layer_count
-        self._leaf_role = leaf_role
-        self._pending_title = pending_title
-        self._elsewhere = busy_elsewhere
-        parts = [f"{count} 条上下文"] if count else []
-        if layer_count:
-            parts.append(f"这一层 {layer_count} 支")
-        self.context_label.setText(" · ".join(parts))
-        self._update_note()
-        self._update_placeholder()
-
-    def _placeholder_text(self) -> str:
-        if getattr(self, "_pending_title", ""):
-            return f"写下要接在「{self._pending_title}」之后的新问题…"
-        if getattr(self, "_leaf_role", "") == "user":
-            return "这一支还没有回答；用这一层的 + 生成"
-        return "写下你的下一条…"
-
-    def _update_placeholder(self) -> None:
-        if not self._busy:
-            self.edit.setPlaceholderText(self._placeholder_text())
-
-    def _update_note(self) -> None:
-        text = ""
-        kind = ""
-        if getattr(self, "_elsewhere", False):
-            text = "另一分支正在生成 · 这里的改动不会串线"
-            kind = "live"
-        if getattr(self, "_pending_title", ""):
-            text = f"新问题将接在「{self._pending_title}」之后 · Esc 取消"
-            kind = "branch"
-        elif getattr(self, "_leaf_role", "") == "user":
-            text = "这一支停在你的提问上；用这一层的 ＋ 生成回答"
-            kind = "branch"
-        if self._busy:
-            text = "正在生成 · 已收到的内容会实时保留"
-            kind = "live"
-        if not text:
-            self.note.setVisible(False)
-            return
-        self.note.setVisible(True)
+        self._slot_text = text
+        self._slot_placeholder = placeholder or "写下你的下一条…"
+        self._slot_verb = verb
+        self._can_send = can_send
+        self._send_reason = send_reason
         self._note_label.setText(text)
-        if kind == "live":
-            self._note_dot.setStyleSheet(f"color:{C.brass}; background:transparent; font-size:6pt;")
-        else:
-            self._note_dot.setStyleSheet(f"color:{C.sage}; background:transparent; font-size:6pt;")
+        self._note_label.setToolTip(text)
+        self._locate_btn.setVisible(offscreen)
+        self._reset_btn.setEnabled(reset_enabled)
+        self._mode_btn.setVisible(show_mode)
+        self._mode_btn.setText(mode_label or "模式")
+        self._propose_btn.setVisible(show_propose)
+        self._propose_btn.setEnabled(propose_enabled)
+        self.set_edit_enabled(edit_enabled)
+        if not self._busy:
+            self.hint.setText(f"Enter {verb} · Shift+Enter 换行")
+            self.edit.setPlaceholderText(self._slot_placeholder)
+        self.send_button.setToolTip(
+            send_reason if not can_send and send_reason else f"{verb} · {text}"
+        )
+        self._update_send()
 
     def _on_text(self) -> None:
         self._adjust_height()
@@ -439,7 +452,7 @@ class Composer(QWidget):
         if self._busy:
             self.send_button.set_mode("stop")
         else:
-            self.send_button.set_mode("send" if self.text().strip() else "disabled")
+            self.send_button.set_mode("send" if self._can_send else "disabled")
 
     def _on_send_clicked(self) -> None:
         if self._busy:
@@ -448,12 +461,9 @@ class Composer(QWidget):
             self._submit()
 
     def _submit(self) -> None:
-        if self._busy:
+        if self._busy or not self._can_send:
             return
-        text = self.text().strip()
-        if not text:
-            return
-        self.submit.emit(text)
+        self.submit.emit(self.text())
 
     def _adjust_height(self) -> None:
         doc = self.edit.document()

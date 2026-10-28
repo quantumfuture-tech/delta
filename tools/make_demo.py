@@ -3,6 +3,7 @@ sys.path.insert(0, "D:/LMY/coding/aichat/a")
 from pathlib import Path
 from delta.core.client import ChatClient
 from delta.core.context import chain_messages
+from delta.core import commands
 from delta.core.model import Conversation
 from delta.core.store import Store
 
@@ -21,8 +22,9 @@ def add_answer(parent_user_id, model="deepseek-chat"):
     if res.status != "complete":
         print("ERROR", res.status, res.error)
         return None
-    a = c.create(
-        c.layer(parent_user_id),
+    a = commands.add_child(
+        c,
+        parent_user_id,
         "assistant",
         res.text,
         model=model,
@@ -34,12 +36,12 @@ def add_answer(parent_user_id, model="deepseek-chat"):
 
 
 def ask(prompt, parent_id, model="deepseek-chat"):
-    u = c.create(c.layer(parent_id), "user", prompt, model=model)
+    u = commands.add_child(c, parent_id, "user", prompt, model=model)
     a = add_answer(u.id, model)
     return u, a
 
 
-u1 = c.create(None, "user", "我在做一个会分叉的对话客户端。请用三个要点解释：为什么把「默认孩子」记成一个指针，比把整条路径另存一份更好？每个要点 45 字左右，用粗体短标签开头，不要开场白。", model="deepseek-reasoner")
+u1 = commands.add_root(c, "我在做一个会分叉的对话客户端。请用三个要点解释：为什么把「默认孩子」记成一个指针，比把整条路径另存一份更好？每个要点 45 字左右，用粗体短标签开头，不要开场白。", model="deepseek-reasoner")
 a1 = add_answer(u1.id, "deepseek-reasoner")
 # branch B: a different follow-up from a1
 uB, aB = ask("反过来想：如果分叉完全免费，会带来什么新的负担？给三点，每点 35 字左右，不要开场白。", a1.id, "deepseek-chat")
@@ -48,9 +50,9 @@ u2, a2 = ask("从信息架构的角度，给出三条具体建议，每条 40 �
 # alternative assistant answer under u2: a second answer in the same layer
 d2 = add_answer(u2.id, "deepseek-chat")
 # chosen path: u1 -> a1 -> u2 -> a2
-c.activate(a1.id, u2.id)
+commands.set_active(c, a1.id, u2.id)
 if a2 is not None:
-    c.activate(u2.id, a2.id)
+    commands.set_active(c, u2.id, a2.id)
 c.rename("分叉，作为一种思考方式")
 c.ui["draft"] = "如果把 ATLAS 收起来，界面还成立吗？"
 store.save(c)

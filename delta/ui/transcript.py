@@ -22,7 +22,8 @@ from .theme import C, color
 
 class TranscriptView(QScrollArea):
     activate_requested = Signal(str, str)
-    new_requested = Signal(str)
+    tail_slot_requested = Signal(str)
+    slot_requested = Signal(str, str, str)
     close_requested = Signal(str, str)
     reorder_requested = Signal(str, str, int)
     baseline_requested = Signal(str)
@@ -229,7 +230,8 @@ class TranscriptView(QScrollArea):
             cached.deleteLater()
         bar = LayerBar(self.convo, parent_id, active_child=active)
         bar.activate_requested.connect(self.activate_requested)
-        bar.new_requested.connect(self.new_requested)
+        bar.tail_slot_requested.connect(self.tail_slot_requested)
+        bar.slot_requested.connect(self.slot_requested)
         bar.close_requested.connect(self.close_requested)
         bar.reorder_requested.connect(self.reorder_requested)
         bar.baseline_requested.connect(self.baseline_requested)

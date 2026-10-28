@@ -22,6 +22,7 @@ from __future__ import annotations
 import re
 import time
 import uuid
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from typing import Any, Literal
 
@@ -29,6 +30,7 @@ Role = Literal["user", "assistant"]
 Status = Literal["complete", "streaming", "interrupted", "error"]
 
 SCHEMA = 2
+ROOT_SCOPE = "__root__"
 DEFAULT_MODEL = "deepseek-chat"
 MODELS = ("deepseek-chat", "deepseek-reasoner")
 
@@ -41,12 +43,8 @@ class LayerLocked(RuntimeError):
         super().__init__(f"layer is locked: {parent_id}")
 
 
-class SendBlocked(RuntimeError):
-    """The view ends on a question that has no answer yet."""
-
-    def __init__(self, reason: str = "waiting_for_answer") -> None:
-        self.reason = reason
-        super().__init__(reason)
+class ScopeError(RuntimeError):
+    """A layer write was attempted outside the command's declared layer."""
 
 
 def new_id(prefix: str = "n") -> str:
@@ -234,6 +232,7 @@ class Conversation:
         self.nodes: dict[str, Node] = {}
         self.baseline_id: str | None = None
         self.display_order: dict[str, list[str]] = {}
+        self._write_scope_layer: str | None = None
         self.created_at = created_at if created_at is not None else _now()
         self.updated_at = self.created_at
         self.rev = 0
@@ -373,6 +372,22 @@ class Conversation:
         self.updated_at = _now()
         self.rev += 1
 
+    # -- write scope ---------------------------------------------------
+    @contextmanager
+    def _writing(self, layer: str):
+        """The command executor opens exactly one layer for one basic command."""
+        if self._write_scope_layer is not None:
+            raise ScopeError("nested layer write")
+        self._write_scope_layer = layer
+        try:
+            yield
+        finally:
+            self._write_scope_layer = None
+
+    def _require_scope(self, layer: str) -> None:
+        if self._write_scope_layer != layer:
+            raise ScopeError(f"layer {layer!r} is not the declared write layer")
+
     # -- layer mutations (the only doors) ------------------------------
     def _require_child(self, layer: Layer, child_id: str) -> Node:
         child = self.get(child_id)
@@ -399,10 +414,12 @@ class Conversation:
         layer: Layer | None = None
         parent_node: Node | None = None
         if parent is None:
+            self._require_scope(ROOT_SCOPE)
             if self.nodes:
                 raise ValueError("conversation already has a root")
         else:
             layer = self._resolve_layer(parent)
+            self._require_scope(layer.parent_id)
             layer.require_open()
             parent_node = layer.parent
         if node_id is None:
@@ -438,11 +455,13 @@ class Conversation:
         self._touch()
         return node
 
-    def activate(self, parent: str | Layer, child_id: str) -> None:
-        """Switch one layer: change exactly one default."""
+    def activate(self, parent: str | Layer, child_id: str | None) -> None:
+        """Switch one layer: change exactly one default (or clear it)."""
         layer = self._resolve_layer(parent)
+        self._require_scope(layer.parent_id)
         layer.require_open()
-        self._require_child(layer, child_id)
+        if child_id is not None:
+            self._require_child(layer, child_id)
         node = layer.parent
         if node.default_child == child_id:
             return
@@ -452,6 +471,7 @@ class Conversation:
     def close(self, parent: str | Layer, child_id: str) -> int:
         """Close one tab: remove its subtree; the active child picks a neighbour."""
         layer = self._resolve_layer(parent)
+        self._require_scope(layer.parent_id)
         layer.require_open()
         self._require_child(layer, child_id)
         was_active = layer.parent.default_child == child_id
@@ -473,6 +493,7 @@ class Conversation:
     def reorder(self, parent: str | Layer, child_id: str, index: int) -> None:
         """Move one child within its layer's display order.  Nothing else moves."""
         layer = self._resolve_layer(parent)
+        self._require_scope(layer.parent_id)
         layer.require_open()
         self._require_child(layer, child_id)
         order = self.display_ids(layer.parent_id)
@@ -485,9 +506,10 @@ class Conversation:
         self._touch()
 
     def _remove_subtree(self, node_id: str) -> int:
-        """Internal repair/delete helper.  Prefer close(), which checks the lock."""
+        """Internal repair/delete helper; only callable inside a declared write."""
         node = self.get(node_id)
         parent_id = node.parent_id
+        self._require_scope(parent_id if parent_id is not None else ROOT_SCOPE)
         doomed: list[str] = []
         stack = [node_id]
         while stack:
@@ -557,53 +579,25 @@ class Conversation:
             self._touch()
         return changed
 
-    # -- writing a new message -----------------------------------------
-    def send(self, text: str) -> tuple[Node, Node]:
-        """Append at the view end: a user turn plus its streaming answer."""
-        leaf = self.view_leaf()
-        if leaf is not None and self.nodes[leaf].role == "user":
-            raise SendBlocked("waiting_for_answer")
-        if leaf is None:
-            user = self.create(None, "user", text, model=self.model)
-        else:
-            user = self.create(self.layer(leaf), "user", text, model=self.model)
-        assistant = self.create(
-            self.layer(user.id), "assistant", status="streaming", model=self.model
-        )
-        return user, assistant
-
-    def ask(self, parent_id: str, text: str) -> tuple[Node, Node]:
-        """New question under an assistant layer, plus its streaming answer."""
-        parent = self.get(parent_id)
-        if parent.role != "assistant":
-            raise ValueError("a new question attaches under an assistant node")
-        user = self.create(self.layer(parent_id), "user", text, model=self.model)
-        assistant = self.create(
-            self.layer(user.id), "assistant", status="streaming", model=self.model
-        )
-        return user, assistant
-
-    def answer(self, parent_id: str) -> Node:
-        """New answer under a user layer."""
-        parent = self.get(parent_id)
-        if parent.role != "user":
-            raise ValueError("an answer attaches under a user node")
-        return self.create(
-            self.layer(parent_id), "assistant", status="streaming", model=self.model
-        )
-
+    # -- stream repair (also a declared write) -------------------------
     def abandon(self, node_id: str) -> bool:
         """Drop a streaming placeholder that never produced content.
 
-        This is stream repair, not a layer operation: it is only legal while
-        the node is still streaming and empty, and it never touches a real
-        message.
+        This is stream repair, not a user layer operation: it is only legal
+        while the node is still streaming and empty, and it runs inside the
+        command layer's declared write scope like any other layer change.
         """
         node = self.nodes.get(node_id)
         if node is None or node.status != "streaming":
             return False
         if node.text.strip():
             return False
+        parent_id = node.parent_id
+        if parent_id is None:
+            self._require_scope(ROOT_SCOPE)
+        else:
+            self._require_scope(parent_id)
+            self.layer(parent_id).require_open()
         self._remove_subtree(node_id)
         self._touch()
         return True

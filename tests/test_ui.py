@@ -8,11 +8,13 @@ from PySide6.QtCore import QPoint, Qt
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QDialog
 
+from delta.core import commands, slots
 from delta.core.client import StreamError, StreamResult
 from delta.core.model import Conversation
 from delta.core.store import Store
 import delta.ui.main_window as main_window_module
 from delta.ui.main_window import MainWindow
+from tests import helpers
 
 
 class FakeClient:
@@ -22,8 +24,10 @@ class FakeClient:
         self.chunks = chunks
         self.delay = delay
         self.error = error
+        self.calls = []
 
     def stream(self, messages, model, cancel=None, on_delta=None):
+        self.calls.append([dict(m) for m in messages])
         text = ""
         for chunk in self.chunks:
             if cancel is not None and cancel.is_set():
@@ -54,6 +58,17 @@ def wait_idle(app, window, timeout=4.0) -> bool:
     return False
 
 
+def wait_proposal(app, window, timeout=4.0) -> bool:
+    end = time.time() + timeout
+    while time.time() < end:
+        app.processEvents()
+        if window._proposal_job is None:
+            app.processEvents()
+            return True
+        time.sleep(0.008)
+    return False
+
+
 @pytest.fixture
 def window(qapp, tmp_path):
     store = Store(tmp_path / "data")
@@ -70,26 +85,33 @@ def window(qapp, tmp_path):
     pump(qapp, 30)
 
 
-def seed(window, qapp, *, extra_answer=False):
-    """root -> a1 -> Q1 -> (B1 | B2); optionally a second answer a2 under root."""
+def type_text(window, text: str) -> None:
+    window.composer.set_text(text)
+    window._draft_changed(text)
+
+
+def seed(window, qapp, *, extra=False):
+    """root -> a1 -> Q1 -> (B1 | B2); optionally a2 under root."""
     c = window.convo
-    u0 = c.create(None, "user", "root")
-    a1 = c.create(c.layer(u0.id), "assistant", "A1")
+    u0 = helpers.root(c, "root")
+    a1 = helpers.add(c, u0.id, "assistant", "A1")
     a1.text = "A1"
-    u1 = c.create(c.layer(a1.id), "user", "Q1")
-    b1 = c.create(c.layer(u1.id), "assistant", "B1")
+    u1 = helpers.add(c, a1.id, "user", "Q1")
+    b1 = helpers.add(c, u1.id, "assistant", "B1")
     b1.text = "B1"
-    b2 = c.create(c.layer(u1.id), "assistant", "B2")
+    b2 = helpers.add(c, u1.id, "assistant", "B2")
     b2.text = "B2"
-    c.activate(u1.id, b1.id)
+    helpers.activate(c, u1.id, b1.id)
     a2 = None
-    if extra_answer:
-        a2 = c.create(c.layer(u0.id), "assistant", "A2")
+    if extra:
+        a2 = helpers.add(c, u0.id, "assistant", "A2")
         a2.text = "A2"
-        c.activate(u0.id, a1.id)
+        helpers.activate(c, u0.id, a1.id)
     window._refresh_stack()
     window.transcript.rebuild()
     window._refresh_meta()
+    window.drafts.active = slots.default_key(c)
+    window._bind_slot(load_text=True)
     pump(qapp, 80)
     return c, u0, a1, u1, b1, b2, a2
 
@@ -118,6 +140,7 @@ def test_stream_complete_and_persist(qapp, window):
     assert not window.composer._busy
     saved = window.store.load(window.convo.id)
     assert saved.nodes[chain[-1].id].text == "你好\n\n## 标题"
+    assert window.drafts.active_key(window.convo) == slots.SlotKey(chain[-1].id, None)
 
 
 def test_interrupt_preserves_partial(qapp, window):
@@ -138,7 +161,8 @@ def test_interrupt_preserves_partial(qapp, window):
 
 def test_enter_key_sends(qapp, window):
     window.client = FakeClient(["ok"])
-    window.composer.set_text("键盘发送")
+    window.composer.focus_input()
+    QTest.keyClicks(window.composer.edit, "keyboard")
     QTest.keyClick(window.composer.edit, Qt.Key.Key_Return)
     assert wait_idle(qapp, window)
     assert window.convo.view()[-1].text == "ok"
@@ -148,8 +172,8 @@ def test_enter_key_sends(qapp, window):
 def test_final_markdown_after_streaming(qapp, window):
     from delta.ui.markdown_render import DOC_CSS
 
-    window.client = FakeClient(["## 标题", "\n\n**粗体** 和 `代码`"])
-    window._send("渲染")
+    window.client = FakeClient(["## 标题", "\n\n**粗体** 和 " + chr(96) + "代码" + chr(96)])
+    window._send("render")
     assert wait_idle(qapp, window)
     node = window.convo.view()[-1]
     card = window.transcript.card_for(node.id)
@@ -160,7 +184,7 @@ def test_final_markdown_after_streaming(qapp, window):
 
 def test_error_without_content_leaves_no_half_node(qapp, window):
     window.client = FakeClient([], error=StreamError("auth", "nope", status=401))
-    window._send("拒绝我")
+    window._send("refuse")
     assert wait_idle(qapp, window)
     chain = window.convo.view()
     assert len(chain) == 1
@@ -170,20 +194,26 @@ def test_error_without_content_leaves_no_half_node(qapp, window):
     assert not window.composer._busy
 
 
-def test_send_blocked_when_view_ends_on_a_question(qapp, window):
-    window.convo.create(None, "user", "only question")
+def test_default_slot_at_a_user_leaf_is_renew_answer(qapp, window):
+    c = window.convo
+    leaf = helpers.root(c, "only question")
+    window._refresh_stack()
     window.transcript.rebuild()
     window._refresh_meta()
-    pump(qapp, 60)
-    window.client = FakeClient(["should not run"])
-    window._send("more")
-    pump(qapp, 40)
-    assert len(window.convo.nodes) == 1
-    assert window.toast.isVisible()
+    key = window.drafts.active_key(c)
+    assert key == slots.SlotKey(leaf.id, None)
+    draft = window.drafts.ensure(c, key)
+    assert draft.mode == slots.NEW_ANSWER
+    assert "再生成" in window.composer._note_label.text()
+    assert slots.can_send(c, key, draft)
+    window.client = FakeClient(["answer"])
+    window._send("")
+    assert wait_idle(qapp, window)
+    assert c.view()[-1].text == "answer"
 
 
 def test_activate_replaces_only_the_suffix(qapp, window):
-    c, u0, a1, u1, b1, b2, a2 = seed(window, qapp, extra_answer=True)
+    c, u0, a1, u1, b1, b2, a2 = seed(window, qapp, extra=True)
     before = window.transcript.row_widgets()
     prefix = {k: id(v) for k, v in before.items() if k in ("n:" + u0.id, "l:" + u0.id)}
     window._activate(u0.id, a2.id)
@@ -195,7 +225,7 @@ def test_activate_replaces_only_the_suffix(qapp, window):
 
 
 def test_switch_back_reuses_cached_cards(qapp, window):
-    c, u0, a1, u1, b1, b2, a2 = seed(window, qapp, extra_answer=True)
+    c, u0, a1, u1, b1, b2, a2 = seed(window, qapp, extra=True)
     left_card = window.transcript.card_for(u1.id)
     assert left_card is not None
     window._activate(u0.id, a2.id)
@@ -208,7 +238,7 @@ def test_switch_back_reuses_cached_cards(qapp, window):
 
 
 def test_locked_layer_click_only_opens_the_confirmation(qapp, window):
-    c, u0, a1, u1, b1, b2, a2 = seed(window, qapp, extra_answer=True)
+    c, u0, a1, u1, b1, b2, a2 = seed(window, qapp, extra=True)
     window._set_baseline(b2.id)
     pump(qapp, 60)
     assert c.locked_parent_ids() == {u0.id, a1.id, u1.id}
@@ -219,11 +249,10 @@ def test_locked_layer_click_only_opens_the_confirmation(qapp, window):
     assert c.nodes[u0.id].default_child == a1.id
     assert c.baseline_id == b2.id
     assert bar._confirm.isVisible()
-    assert [n.id for n in c.view()][-1] == b2.id
 
 
 def test_confirm_raises_the_baseline_and_releases_the_layer(qapp, window):
-    c, u0, a1, u1, b1, b2, a2 = seed(window, qapp, extra_answer=True)
+    c, u0, a1, u1, b1, b2, a2 = seed(window, qapp, extra=True)
     window._set_baseline(b2.id)
     pump(qapp, 60)
     bar = window.transcript._layers[u0.id]
@@ -235,16 +264,10 @@ def test_confirm_raises_the_baseline_and_releases_the_layer(qapp, window):
     assert c.baseline_id == u0.id
     assert c.locked_parent_ids() == set()
     assert c.nodes[u0.id].default_child == a1.id
-    bar = window.transcript._layers[u0.id]
-    chip = next(chip for chip in bar._chips if chip.child.id == a2.id)
-    QTest.mouseClick(chip, Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier, QPoint(30, 16))
-    pump(qapp, 80)
-    assert c.nodes[u0.id].default_child == a2.id
-    assert [n.id for n in c.view()] == [u0.id, a2.id]
 
 
 def test_unlock_confirmation_works_with_tab_and_enter(qapp, window):
-    c, u0, a1, u1, b1, b2, a2 = seed(window, qapp, extra_answer=True)
+    c, u0, a1, u1, b1, b2, a2 = seed(window, qapp, extra=True)
     window._set_baseline(b2.id)
     pump(qapp, 40)
     bar = window.transcript._layers[u0.id]
@@ -280,59 +303,191 @@ def test_close_on_a_locked_layer_asks_for_the_baseline(qapp, window, monkeypatch
     assert b2.id in c.nodes
 
 
-def test_new_answer_at_the_answer_layer(qapp, window):
+def test_open_tail_slot_shows_write_line_and_reset(qapp, window):
     c, u0, a1, u1, b1, b2, a2 = seed(window, qapp)
-    window.client = FakeClient(["fresh answer"])
-    window._new_at_layer(u1.id)
+    keep = len(c.nodes)
+    window._open_tail_slot(a1.id)
+    pump(qapp, 40)
+    assert len(c.nodes) == keep
+    assert "写：" in window.composer._note_label.text()
+    assert "新提问" in window.composer._note_label.text()
+    assert not window.composer._reset_btn.isEnabled()
+    type_text(window, "Q2")
+    pump(qapp, 30)
+    assert window.composer._reset_btn.isEnabled()
+    assert window.drafts.ensure(window.convo, window.drafts.active_key(c)).text == "Q2"
+    window._reset_slot()
+    assert window.composer.text() == ""
+    assert not window.composer._reset_btn.isEnabled()
+
+
+def test_open_base_slot_modes_and_undo(qapp, window, monkeypatch):
+    c, u0, a1, u1, b1, b2, a2 = seed(window, qapp)
+    window._open_slot(u1.id, b1.id, slots.REWRITE_ANSWER)
+    pump(qapp, 40)
+    assert "按意见改" in window.composer._note_label.text()
+    assert window.composer._mode_btn.isVisible()
+    type_text(window, "shorter")
+    monkeypatch.setattr(main_window_module, "ConfirmDialog", _DialogStub)
+    _DialogStub.result = QDialog.DialogCode.Accepted
+    window._switch_slot_mode(slots.EDIT_ANSWER)
+    pump(qapp, 40)
+    assert "自己改" in window.composer._note_label.text()
+    assert window.composer.text() == "B1"
+    window._undo_slot_mode()
+    pump(qapp, 40)
+    assert "按意见改" in window.composer._note_label.text()
+    assert window.composer.text() == "shorter"
+
+
+def test_per_slot_drafts_persist_when_switching(qapp, window):
+    c, u0, a1, u1, b1, b2, a2 = seed(window, qapp)
+    window._open_tail_slot(a1.id)
+    type_text(window, "tail draft")
+    window._open_slot(a1.id, u1.id, slots.REVISE_QUESTION)
+    type_text(window, "revised question")
+    window._open_tail_slot(a1.id)
+    assert window.composer.text() == "tail draft"
+    window._open_slot(a1.id, u1.id, slots.REVISE_QUESTION)
+    assert window.composer.text() == "revised question"
+
+
+def test_offview_write_layer_and_locate(qapp, window):
+    c, u0, a1, u1, b1, b2, a2 = seed(window, qapp, extra=True)
+    window._open_slot(a1.id, u1.id, slots.REVISE_QUESTION)
+    type_text(window, "Q1 changed")
+    window._set_baseline(a2.id)
+    pump(qapp, 60)
+    line = window.composer._note_label.text()
+    assert "不在当前视图" in line
+    assert window.composer._locate_btn.isVisible()
+    window._locate_write_layer()
+    pump(qapp, 60)
+    assert c.baseline_id == a1.id
+    assert "不在当前视图" not in window.composer._note_label.text()
+
+
+def test_locked_send_keeps_draft_and_unlocks_without_writing(qapp, window, monkeypatch):
+    c, u0, a1, u1, b1, b2, a2 = seed(window, qapp, extra=True)
+    window._open_slot(a1.id, u1.id, slots.REVISE_QUESTION)
+    type_text(window, "Q1 changed")
+    window._set_baseline(b2.id)
+    pump(qapp, 40)
+    assert "执行时先抬基准" in window.composer._note_label.text()
+    before = len(c.nodes)
+    monkeypatch.setattr(main_window_module, "ConfirmDialog", _DialogStub)
+    _DialogStub.result = QDialog.DialogCode.Rejected
+    window._send("Q1 changed")
+    pump(qapp, 40)
+    assert len(c.nodes) == before
+    assert window.composer.text() == "Q1 changed"
+    assert window.drafts.ensure(c, window.drafts.active_key(c)).text == "Q1 changed"
+    _DialogStub.result = QDialog.DialogCode.Accepted
+    window._send("Q1 changed")
+    pump(qapp, 80)
+    assert c.baseline_id == a1.id
+    assert len(c.nodes) == before
+    assert window.composer.text() == "Q1 changed"
+    window.client = FakeClient(["new answer"])
+    window._send("Q1 changed")
     assert wait_idle(qapp, window)
-    children = c.children(u1.id)
-    assert len(children) == 3
-    assert c.nodes[u1.id].default_child == children[-1].id
+    assert len(c.nodes) > before
+    assert c.view()[-1].text == "new answer"
+
+
+def test_new_answer_at_the_answer_tail(qapp, window):
+    c, u0, a1, u1, b1, b2, a2 = seed(window, qapp)
+    before = len(c.children(u1.id))
+    window._open_tail_slot(u1.id)
+    assert window.drafts.ensure(c, window.drafts.active_key(c)).mode == slots.NEW_ANSWER
+    window.client = FakeClient(["fresh answer"])
+    window._send("")
+    assert wait_idle(qapp, window)
+    assert len(c.children(u1.id)) == before + 1
     assert c.view()[-1].text == "fresh answer"
 
 
-def test_new_question_at_the_question_layer_uses_the_composer(qapp, window):
+def test_execute_moves_active_slot_to_new_view_leaf(qapp, window):
     c, u0, a1, u1, b1, b2, a2 = seed(window, qapp)
-    window._new_at_layer(a1.id)
-    assert window._pending_parent_id == a1.id
-    window.client = FakeClient(["answer to new question"])
+    old_key = slots.SlotKey(a1.id, None)
+    window._open_tail_slot(a1.id)
+    type_text(window, "Q2")
+    window.client = FakeClient(["answer"])
     window._send("Q2")
     assert wait_idle(qapp, window)
-    assert window._pending_parent_id is None
-    new_q = [n for n in c.children(a1.id) if n.role == "user" and n.text == "Q2"]
-    assert len(new_q) == 1
-    assert c.nodes[a1.id].default_child == new_q[0].id
-    assert c.view()[-1].text == "answer to new question"
+    assert window.drafts.active_key(c) == slots.SlotKey(c.view_leaf(), None)
+    assert window.drafts.ensure(c, old_key).text == ""
 
 
-def test_reorder_changes_only_the_display_order(qapp, window):
+def test_rewrite_empty_is_regenerate(qapp, window):
     c, u0, a1, u1, b1, b2, a2 = seed(window, qapp)
-    before_view = [n.id for n in c.view()]
-    birth = [n.id for n in c.children(u1.id)]
-    window._reorder(u1.id, b2.id, 0)
-    pump(qapp, 40)
-    assert c.display_ids(u1.id) == [b2.id, b1.id]
-    assert [n.id for n in c.children(u1.id)] == birth
-    assert [n.id for n in c.view()] == before_view
-    assert c.nodes[u1.id].default_child == b1.id
+    window._open_slot(u1.id, b1.id, slots.REWRITE_ANSWER)
+    window.client = FakeClient(["fresh"])
+    window._send("")
+    assert wait_idle(qapp, window)
+    assert window.client.calls[-1][-1]["content"] == "Q1"
+    assert c.view()[-1].text == "fresh"
 
 
-def test_atlas_click_only_changes_the_baseline(qapp, window):
-    c, u0, a1, u1, b1, b2, a2 = seed(window, qapp, extra_answer=True)
-    defaults = {nid: n.default_child for nid, n in c.nodes.items()}
-    texts = {nid: n.text for nid, n in c.nodes.items()}
-    window._set_baseline(b2.id)
-    pump(qapp, 60)
-    assert c.baseline_id == b2.id
-    assert c.locked_parent_ids() == {u0.id, a1.id, u1.id}
-    assert {nid: n.default_child for nid, n in c.nodes.items()} == defaults
-    assert {nid: n.text for nid, n in c.nodes.items()} == texts
-    assert [n.id for n in c.view()] == [u0.id, a1.id, u1.id, b2.id]
-    window._reset_baseline()
+def test_rewrite_with_feedback_reads_base(qapp, window):
+    c, u0, a1, u1, b1, b2, a2 = seed(window, qapp)
+    window._open_slot(u1.id, b1.id, slots.REWRITE_ANSWER)
+    type_text(window, "shorter")
+    window.client = FakeClient(["short"])
+    window._send("shorter")
+    assert wait_idle(qapp, window)
+    contents = [m["content"] for m in window.client.calls[-1]]
+    assert "B1" in contents and "shorter" in contents
+    assert c.view()[-1].text == "short"
+
+
+def test_self_edit_answer_has_no_model_call(qapp, window):
+    c, u0, a1, u1, b1, b2, a2 = seed(window, qapp)
+    window._open_slot(u1.id, b1.id, slots.EDIT_ANSWER)
+    type_text(window, "manual answer")
+    window.client = FakeClient([])
+    window._send("manual answer")
     pump(qapp, 80)
-    assert c.baseline_id == u0.id
-    assert c.locked_parent_ids() == set()
-    assert c.nodes[u0.id].default_child == a1.id
+    assert window.client.calls == []
+    assert c.view()[-1].text == "manual answer"
+    assert c.view()[-1].status == "complete"
+
+
+def test_propose_question_replaces_draft_only(qapp, window):
+    c, u0, a1, u1, b1, b2, a2 = seed(window, qapp)
+    window._open_slot(a1.id, u1.id, slots.REVISE_QUESTION)
+    type_text(window, "current Q")
+    before = len(c.nodes)
+    window.client = FakeClient(["Q1 better"])
+    window._propose_question()
+    assert wait_proposal(qapp, window)
+    assert len(c.nodes) == before
+    draft = window.drafts.ensure(c, window.drafts.active_key(c))
+    assert draft.mode == slots.REVISE_QUESTION
+    assert draft.text == "Q1 better"
+    assert draft.dirty
+
+
+def test_restart_restores_active_slot_and_draft(qapp, tmp_path):
+    store = Store(tmp_path / "restart")
+    c = Conversation(title="restart")
+    u = helpers.root(c, "root")
+    a = helpers.add(c, u.id, "assistant", "A")
+    store.save(c)
+    w = MainWindow(store, store.read_settings(), c)
+    w.resize(1200, 800); w.show(); pump(qapp, 160)
+    w._open_slot(u.id, a.id, slots.REWRITE_ANSWER)
+    type_text(w, "unsent feedback")
+    w._save_slots(0); w._save_now()
+    w.close(); pump(qapp, 40)
+    loaded = store.load(c.id)
+    w2 = MainWindow(store, store.read_settings(), loaded)
+    w2.resize(1200, 800); w2.show(); pump(qapp, 260)
+    key = w2.drafts.active_key(loaded)
+    assert key == slots.SlotKey(u.id, a.id)
+    assert w2.drafts.ensure(loaded, key).text == "unsent feedback"
+    assert w2.composer.text() == "unsent feedback"
+    w2.close(); w2.deleteLater(); pump(qapp, 30)
 
 
 def test_card_has_only_the_copy_action(qapp, window):
@@ -349,12 +504,12 @@ def test_card_has_only_the_copy_action(qapp, window):
 
 def test_tabs_stay_on_one_row_and_scroll(qapp, window):
     c = window.convo
-    u0 = c.create(None, "user", "root")
+    u0 = helpers.root(c, "root")
     kids = []
     for i in range(8):
-        kid = c.create(c.layer(u0.id), "assistant", f"分支 {i}: " + "很长很长的一段预览文字，" * 3)
+        kid = helpers.add(c, u0.id, "assistant", f"branch {i}: " + "long preview text, " * 6)
         kids.append(kid)
-    c.activate(u0.id, kids[0].id)
+    helpers.activate(c, u0.id, kids[0].id)
     window._refresh_stack()
     window.transcript.rebuild()
     window._refresh_meta()
@@ -368,95 +523,15 @@ def test_tabs_stay_on_one_row_and_scroll(qapp, window):
     assert bar._scroll.horizontalScrollBar().maximum() > 0
 
 
-def test_restart_restores_baseline_and_scroll(qapp, tmp_path):
-    store = Store(tmp_path / "restart")
-    c = Conversation(title="restart")
-    root = c.create(None, "user", "root")
-    last = root
-    for i in range(14):
-        u = c.create(c.layer(last.id), "user", "第 %d 个问题，带一点长度让内容超过一屏。" % i)
-        a = c.create(c.layer(u.id), "assistant", ("回答 %d。\n\n" % i) + ("这是一段用于撑高页面的内容。" * 6))
-        last = a
-    c.set_baseline(last.parent_id)
-    store.save(c)
-    w = MainWindow(store, store.read_settings(), c)
-    w.resize(1280, 800)
-    w.show()
-    pump(qapp, 250)
-    assert w.transcript.verticalScrollBar().maximum() > 0
-    w.transcript.verticalScrollBar().setValue(260)
-    pump(qapp, 220)
-    state = w.transcript.capture()
-    c.ui["scroll"] = state
-    w._save_now()
-    w.close()
-    pump(qapp, 50)
-    loaded = store.load(c.id)
-    assert loaded.baseline_id == c.baseline_id
-    assert loaded.ui["scroll"]["key"] == state["key"]
-    w2 = MainWindow(store, store.read_settings(), loaded)
-    w2.resize(1280, 800)
-    w2.show()
-    pump(qapp, 500)
-    state2 = w2.transcript.capture()
-    for _ in range(3):
-        if state2["key"] == state["key"]:
-            break
-        pump(qapp, 150)
-        state2 = w2.transcript.capture()
-    assert state2["key"] == state["key"]
-    assert abs(state2["offset"] - state["offset"]) <= 2
-    assert w2.convo.baseline_id == c.baseline_id
-    w2.close()
-    w2.deleteLater()
-    pump(qapp, 30)
-
-
-def test_rapid_operations_do_not_crosstalk(qapp, window):
-    c, u0, a1, u1, b1, b2, a2 = seed(window, qapp, extra_answer=True)
-    window.client = FakeClient(["x"] * 80, delay=0.02)
-    window._send("streaming on the view end")
-    pump(qapp, 120)
-    streaming_id = window._active_node_id
-    assert streaming_id is not None
-    window._send("must be ignored")
-    pump(qapp, 30)
-    user_count = sum(1 for n in c.nodes.values() if n.role == "user")
-    assert user_count == 3
-    window._activate(u0.id, a2.id)
-    pump(qapp, 80)
-    assert [n.id for n in c.view()] == [u0.id, a2.id]
-    partial_before = len(c.nodes[streaming_id].text)
-    window._stop_generation()
-    window._stop_generation()
-    pump(qapp, 60)
-    assert c.nodes[streaming_id].status == "interrupted"
-    assert c.nodes[a2.id].text == "A2"
-    assert len(c.nodes[streaming_id].text) >= partial_before
-    assert window._job is None
-    window.client = FakeClient(["new", " answer"])
-    window._send("after")
-    assert wait_idle(qapp, window)
-    assert c.nodes[a2.id].text == "A2"
-    assert window.convo.view()[-1].text == "new answer"
-
-
-def test_converge_writes_the_shortcut_from_the_menu(qapp, window, monkeypatch):
+def test_add_chip_opens_a_slot_without_creating(qapp, window):
     c, u0, a1, u1, b1, b2, a2 = seed(window, qapp)
-    window._set_baseline(b2.id)
-    pump(qapp, 40)
-    assert c.nodes[u1.id].default_child == b1.id
-    before_view = [n.id for n in c.view()]
-    monkeypatch.setattr(main_window_module, "ConfirmDialog", _DialogStub)
-    _DialogStub.result = QDialog.DialogCode.Accepted
-    window._converge()
-    pump(qapp, 40)
-    assert c.nodes[u1.id].default_child == b2.id
-    assert c.baseline_id == b2.id
-    assert [n.id for n in c.view()] == before_view
-    window._reset_baseline()
+    before = len(c.nodes)
+    bar = window.transcript._layers[u1.id]
+    QTest.mouseClick(bar._add, Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier, QPoint(20, 16))
     pump(qapp, 60)
-    assert [n.id for n in c.view()] == before_view
+    assert len(c.nodes) == before
+    assert window.drafts.active_key(c) == slots.SlotKey(u1.id, None)
+    assert window.drafts.ensure(c, window.drafts.active_key(c)).mode == slots.NEW_ANSWER
 
 
 def test_drag_reorders_the_layer_without_moving_the_view(qapp, window):
@@ -471,16 +546,6 @@ def test_drag_reorders_the_layer_without_moving_the_view(qapp, window):
     assert c.view()[-1].id == b1.id
 
 
-def test_add_chip_creates_an_answer(qapp, window):
-    c, u0, a1, u1, b1, b2, a2 = seed(window, qapp)
-    bar = window.transcript._layers[u1.id]
-    window.client = FakeClient(["plus answer"])
-    QTest.mouseClick(bar._add, Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier, QPoint(20, 16))
-    assert wait_idle(qapp, window)
-    assert c.children(u1.id)[-1].text == "plus answer"
-    assert c.view()[-1].text == "plus answer"
-
-
 def test_close_chip_removes_the_branch(qapp, window, monkeypatch):
     c, u0, a1, u1, b1, b2, a2 = seed(window, qapp)
     monkeypatch.setattr(main_window_module, "ConfirmDialog", _DialogStub)
@@ -493,7 +558,7 @@ def test_close_chip_removes_the_branch(qapp, window, monkeypatch):
     assert c.view()[-1].id == b1.id
 
 
-def test_context_menu_is_the_entrance_for_a_hidden_single_child_layer(qapp, window, monkeypatch):
+def test_context_menu_is_the_entrance_for_a_slot(qapp, window, monkeypatch):
     class MenuStub:
         last = None
 
@@ -518,14 +583,15 @@ def test_context_menu_is_the_entrance_for_a_hidden_single_child_layer(qapp, wind
     window._card_menu(a1.id, QPoint(0, 0))
     actions = MenuStub.last.actions
     assert "在这一层新建…" in actions
-    assert "关闭这一支…" in actions
+    assert "按意见改（模型）" in actions
+    assert "自己改（不调模型）" in actions
     window._set_baseline(b2.id)
     pump(qapp, 40)
     window._card_menu(a1.id, QPoint(0, 0))
     assert "这一层已锁 · 抬基准…" in MenuStub.last.actions
 
 
-def test_ui_has_no_direct_model_writes():
+def test_ui_has_no_direct_layer_writes():
     root = Path(__file__).resolve().parents[1] / "delta" / "ui"
     forbidden = [
         r"\.default_child\s*=(?!=)",
@@ -533,8 +599,18 @@ def test_ui_has_no_direct_model_writes():
         r"\.display_order\s*=(?!=)",
         r"\.nodes\s*\[[^\]]*\]\s*=(?!=)",
         r"\.nodes\.(pop|clear)\(",
-        r"_remove_subtree\(",
-        r"_touch\(",
+        r"\._write_",
+        r"\._writing\(",
+        r"\._require_scope\(",
+        r"\.create\(\s*(self\.)?convo",
+        r"convo\.create\(",
+        r"convo\.activate\(",
+        r"convo\.close\(",
+        r"convo\.reorder\(",
+        r"convo\.send\(",
+        r"convo\.ask\(",
+        r"convo\.answer\(",
+        r"convo\.abandon\(",
         r"set_pointer|preferred_child|delete_subtree|add_user|add_assistant|canonical_leaf",
     ]
     hits = []

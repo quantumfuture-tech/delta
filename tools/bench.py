@@ -6,6 +6,7 @@ from PySide6.QtWidgets import QApplication
 from PySide6.QtTest import QTest
 from PySide6.QtCore import Qt
 
+from delta.core import commands
 from delta.core.model import Conversation
 from delta.core.store import Store
 from delta.ui import theme
@@ -16,8 +17,8 @@ DATA = Path("D:/LMY/coding/aichat/a/build/bench_data")
 import shutil; shutil.rmtree(DATA, ignore_errors=True)
 store = Store(DATA)
 c = Conversation(title="perf")
-u = c.create(None, "user", "性能测试：一条足够长的消息")
-a = c.create(c.layer(u.id), "assistant", status="complete")
+u = commands.add_root(c, "性能测试：一条足够长的消息")
+a = commands.add_child(c, u.id, "assistant", status="complete")
 a.text = ("分叉不是把树画出来，而是让路径保持可读。" * 60) + "\n\n" + ("这是一段额外的正文，用于模拟较长的流式消息。" * 40)
 store.save(c)
 w = MainWindow(store, store.read_settings(), c); w.resize(1420, 950); w.show()
@@ -67,11 +68,11 @@ for i in range(70):
 a.status = "complete"; w.transcript.refresh_node(a.id); pump(80)
 
 # --- branch switch: build a layer under the first answer and switch it
-u2 = c.create(c.layer(a.id), "user", "左支：从信息架构看")
-a2 = c.create(c.layer(u2.id), "assistant", "左支的回答。" * 8, status="complete")
-b1 = c.create(c.layer(a.id), "user", "右支：从成本看")
-b2 = c.create(c.layer(b1.id), "assistant", "右支的回答。" * 8, status="complete")
-c.activate(a.id, u2.id)
+u2 = commands.add_child(c, a.id, "user", "左支：从信息架构看")
+a2 = commands.add_child(c, u2.id, "assistant", "左支的回答。" * 8, status="complete")
+b1 = commands.add_child(c, a.id, "user", "右支：从成本看")
+b2 = commands.add_child(c, b1.id, "assistant", "右支的回答。" * 8, status="complete")
+commands.set_active(c, a.id, u2.id)
 w.transcript.rebuild(); w._refresh_meta(); pump(120)
 switches = []
 for i in range(20):

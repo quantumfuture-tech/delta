@@ -4,20 +4,21 @@ import pytest
 
 from delta.core.model import Conversation
 from delta.core.store import Store, StoreError
+from tests.helpers import add, reorder, root
 
 
 def test_roundtrip_preserves_everything(tmp_path):
     store = Store(tmp_path)
     c = Conversation(title="对话")
-    u = c.create(None, "user", "你好")
-    a = c.create(c.layer(u.id), "assistant", "回答\n\n带 **markdown**", model="deepseek-reasoner")
+    u = root(c, "你好")
+    a = add(c, u.id, "assistant", "回答\n\n带 **markdown**", model="deepseek-reasoner")
     a.reasoning = "推理"
     a.meta["finish_reason"] = "stop"
-    b = c.create(c.layer(a.id), "user", "分叉")
-    b2 = c.create(c.layer(a.id), "user", "另一个分叉")
-    c.reorder(a.id, b2.id, 0)
+    b = add(c, a.id, "user", "分叉")
+    b2 = add(c, a.id, "user", "另一个分叉")
+    reorder(c, a.id, b2.id, 0)
     c.set_baseline(a.id)
-    c.ui = {"scroll": {"anchor": a.id, "offset": 42}, "draft": "草稿"}
+    c.ui = {"scroll": {"anchor": a.id, "offset": 42}, "slots": {"version": 1, "active": None, "items": []}}
     store.save(c)
 
     loaded = store.load(c.id)
@@ -26,7 +27,7 @@ def test_roundtrip_preserves_everything(tmp_path):
     assert loaded.nodes[u.id].default_child == a.id
     assert loaded.display_ids(a.id) == [b2.id, b.id]
     assert [n.id for n in loaded.children(a.id)] == [b.id, b2.id]
-    assert loaded.ui["draft"] == "草稿"
+    assert loaded.ui["slots"]["version"] == 1
     assert loaded.nodes[a.id].text == "回答\n\n带 **markdown**"
     assert loaded.nodes[a.id].default_child == b2.id
 
@@ -34,10 +35,10 @@ def test_roundtrip_preserves_everything(tmp_path):
 def test_list_is_sorted_and_includes_summary(tmp_path):
     store = Store(tmp_path)
     first = Conversation(title="first")
-    first.create(None, "user", "one")
+    root(first, "one")
     store.save(first)
     second = Conversation(title="second")
-    second.create(None, "user", "two")
+    root(second, "two")
     second.updated_at = first.updated_at + 10
     store.save(second)
     items = store.list()
@@ -49,7 +50,7 @@ def test_list_is_sorted_and_includes_summary(tmp_path):
 def test_delete_moves_to_trash(tmp_path):
     store = Store(tmp_path)
     c = Conversation()
-    c.create(None, "user", "q")
+    root(c, "q")
     store.save(c)
     store.delete(c.id)
     assert not store.path_for(c.id).exists()
@@ -78,7 +79,7 @@ def test_settings_roundtrip(tmp_path):
 def test_no_temp_files_left(tmp_path):
     store = Store(tmp_path)
     c = Conversation()
-    c.create(None, "user", "q")
+    root(c, "q")
     store.save(c)
     store.save(c)
     leftovers = list(store.conversations_dir.glob("*.tmp"))
@@ -88,8 +89,8 @@ def test_no_temp_files_left(tmp_path):
 def test_crash_during_stream_normalizes_to_interrupted(tmp_path):
     store = Store(tmp_path)
     c = Conversation()
-    u = c.create(None, "user", "q")
-    a = c.create(c.layer(u.id), "assistant", status="streaming")
+    u = root(c, "q")
+    a = add(c, u.id, "assistant", status="streaming")
     a.text = "半句"
     assert a.status == "streaming"
     store.save(c)
@@ -101,7 +102,7 @@ def test_crash_during_stream_normalizes_to_interrupted(tmp_path):
 def test_saved_document_is_schema_2(tmp_path):
     store = Store(tmp_path)
     c = Conversation()
-    c.create(None, "user", "q")
+    root(c, "q")
     path = store.save(c)
     raw = json.loads(path.read_text(encoding="utf-8"))
     assert raw["schema"] == 2

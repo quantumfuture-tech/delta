@@ -12,12 +12,14 @@ from PySide6.QtGui import QFontMetrics, QKeySequence, QPainter, QPainterPath, QP
 from PySide6.QtWidgets import (
     QHBoxLayout,
     QLabel,
+    QMenu,
     QScrollArea,
     QSizePolicy,
     QVBoxLayout,
     QWidget,
 )
 
+from ..core import slots
 from ..core.model import Conversation, Node, one_line
 from .icons import draw_icon
 from .theme import C, FONT_MONO, FONT_UI, color, font
@@ -35,6 +37,7 @@ class TabChip(QWidget):
     activated = Signal(str)
     closed = Signal(str)
     drag_released = Signal(str, QPoint)
+    slot_menu_requested = Signal(str, QPoint)
 
     def __init__(
         self,
@@ -62,6 +65,10 @@ class TabChip(QWidget):
         self.setFixedHeight(33)
         self.setCursor(Qt.CursorShape.PointingHandCursor)
         self.setAttribute(Qt.WidgetAttribute.WA_Hover, True)
+        self.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.customContextMenuRequested.connect(
+            lambda pos: self.slot_menu_requested.emit(self.child.id, self.mapToGlobal(pos))
+        )
         self.update_content()
         self.setToolTip(self._tooltip())
 
@@ -257,7 +264,8 @@ class LayerBar(QWidget):
     """One layer's entrance.  The lock is checked by the conversation, not here."""
 
     activate_requested = Signal(str, str)
-    new_requested = Signal(str)
+    tail_slot_requested = Signal(str)
+    slot_requested = Signal(str, str, str)
     close_requested = Signal(str, str)
     reorder_requested = Signal(str, str, int)
     baseline_requested = Signal(str)
@@ -394,6 +402,7 @@ class LayerBar(QWidget):
             chip.activated.connect(self._on_activate)
             chip.closed.connect(self._on_close)
             chip.drag_released.connect(self._on_drag)
+            chip.slot_menu_requested.connect(self._tab_menu)
             self._row.addWidget(chip)
             self._chips.append(chip)
         self._row.addStretch(1)
@@ -458,10 +467,24 @@ class LayerBar(QWidget):
         self.close_requested.emit(self.parent_id, child_id)
 
     def _on_add(self) -> None:
-        if self.convo.is_locked(self.parent_id):
-            self._show_confirm()
-            return
-        self.new_requested.emit(self.parent_id)
+        # Opening a slot is a draft action, not a layer write: allowed even locked.
+        self.tail_slot_requested.emit(self.parent_id)
+
+    def _tab_menu(self, child_id: str, global_pos: QPoint) -> None:
+        key = slots.SlotKey(self.parent_id, child_id)
+        modes = slots.allowed_modes(self.convo, key)
+        menu = QMenu(self)
+        menu.setStyleSheet(
+            f"QMenu {{ background:{C.panel_hi}; color:{C.ink_dim}; border:1px solid {C.line}; padding:4px; }}"
+            f"QMenu::item {{ padding:6px 18px; border-radius:4px; }}"
+            f"QMenu::item:selected {{ background:{C.raised}; color:{C.ink}; }}"
+        )
+        for mode in modes:
+            menu.addAction(
+                slots.MODE_LABEL[mode],
+                lambda *_, m=mode: self.slot_requested.emit(self.parent_id, child_id, m),
+            )
+        menu.exec(global_pos)
 
     def _on_drag(self, child_id: str, global_pos: QPoint) -> None:
         if self.convo.is_locked(self.parent_id):

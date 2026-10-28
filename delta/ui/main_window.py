@@ -30,13 +30,14 @@ from PySide6.QtWidgets import (
 )
 
 from ..core.client import ChatClient, StreamError, StreamResult
-from ..core.context import chain_messages
+from ..core import commands, slots
 from ..core.model import (
     Conversation,
     DEFAULT_MODEL,
     MODELS,
     LayerLocked,
-    SendBlocked,
+    ROOT_SCOPE,
+    ScopeError,
     one_line,
 )
 from ..core.store import Store, StoreError
@@ -86,7 +87,11 @@ class MainWindow(QMainWindow):
         self._stream_started = 0.0
         self._closing = False
         self._first_show = True
-        self._pending_parent_id: str | None = None
+        self.drafts = slots.DraftStore()
+        self._binding = False
+        self._proposal_job: StreamJob | None = None
+        self._proposal_key: slots.SlotKey | None = None
+        self._proposal_text: list[str] = []
 
         self._save_timer = QTimer(self)
         self._save_timer.setSingleShot(True)
@@ -98,6 +103,9 @@ class MainWindow(QMainWindow):
         self._stream_save = QTimer(self)
         self._stream_save.setInterval(700)
         self._stream_save.timeout.connect(self._save_now)
+        self._proposal_pump = QTimer(self)
+        self._proposal_pump.setInterval(14)
+        self._proposal_pump.timeout.connect(self._drain_proposal)
 
         self.setMinimumSize(1000, 680)
         self.setWindowTitle("Delta")
@@ -185,7 +193,8 @@ class MainWindow(QMainWindow):
         self.header.about.connect(self._show_info)
 
         self.transcript.activate_requested.connect(self._activate)
-        self.transcript.new_requested.connect(self._new_at_layer)
+        self.transcript.tail_slot_requested.connect(self._open_tail_slot)
+        self.transcript.slot_requested.connect(self._open_slot_signal)
         self.transcript.close_requested.connect(self._close_tab)
         self.transcript.reorder_requested.connect(self._reorder)
         self.transcript.baseline_requested.connect(self._set_baseline)
@@ -202,6 +211,10 @@ class MainWindow(QMainWindow):
         self.composer.stop.connect(self._stop_generation)
         self.composer.draft_changed.connect(self._draft_changed)
         self.composer.model_changed.connect(self._model_changed)
+        self.composer.locate_clicked.connect(self._locate_write_layer)
+        self.composer.reset_clicked.connect(self._reset_slot)
+        self.composer.mode_clicked.connect(self._slot_mode_menu)
+        self.composer.propose_clicked.connect(self._propose_question)
 
     def _shortcuts(self) -> None:
         def bind(seq: str, fn) -> None:
@@ -216,21 +229,23 @@ class MainWindow(QMainWindow):
     # -- conversation lifecycle ----------------------------------------
     def _apply_conversation(self, convo: Conversation, *, restore_scroll: bool = True) -> None:
         self.convo = convo
-        self._pending_parent_id = None
+        self.drafts = slots.DraftStore.from_ui(convo)
+        self._proposal_job = None
+        self._proposal_key = None
         state = convo.ui.get("scroll") if restore_scroll else None
         self.transcript.set_conversation(convo, restore=state)
         self.atlas.set_conversation(convo)
         self.header.set_meta(convo.title or "未命名对话", 0, 0, 0)
         self.composer.set_model(convo.model)
-        self.composer.set_text(str(convo.ui.get("draft", "")))
         self.composer.set_busy(False)
         self._refresh_stack()
         self._refresh_meta()
-        self._update_context()
+        self._bind_slot(load_text=True)
         self._set_atlas(bool(self.settings.get("atlas", True)), save=False)
         self.notice.hide()
         self.settings["last_id"] = convo.id
         self._persist_settings()
+        self._save_slots(0)
         QTimer.singleShot(60, lambda: self.transcript.restore(state))
 
     def _refresh_stack(self) -> None:
@@ -241,31 +256,93 @@ class MainWindow(QMainWindow):
         title = self.convo.title or ("新的对话" if self.convo.is_empty() else "未命名对话")
         self.header.set_meta(title, stats["nodes"], stats["forks"], stats["depth"])
         self.setWindowTitle(f"Delta — {title}" if self.convo.nodes else "Delta")
-        self._update_context()
+        self._refresh_slot_ui()
 
-    def _update_context(self) -> None:
-        view = self.convo.view()
-        leaf_id = self.convo.view_leaf()
-        leaf = self.convo.nodes.get(leaf_id) if leaf_id else None
-        layer_count = len(self.convo.children(leaf.id)) if leaf else 0
-        pending_title = ""
-        if self._pending_parent_id and self._pending_parent_id in self.convo:
-            pending_title = one_line(self.convo.nodes[self._pending_parent_id].text, 16)
-        elsewhere = bool(
-            self._job
-            and self._active_node_id
-            and self._active_node_id not in {n.id for n in view}
+    def _save_slots(self, ms: int = 300) -> None:
+        if not self.convo:
+            return
+        self.convo.ui["slots"] = self.drafts.to_ui()
+        self.convo.ui.pop("draft", None)
+        self._schedule_save(ms)
+
+    def _bind_slot(self, *, load_text: bool = True) -> None:
+        if not getattr(self, "drafts", None):
+            return
+        key = self.drafts.active_key(self.convo)
+        draft = self.drafts.ensure(self.convo, key)
+        self._binding = True
+        try:
+            if load_text:
+                self.composer.set_text(draft.text)
+        finally:
+            self._binding = False
+        self._refresh_slot_ui()
+
+    def _refresh_slot_ui(self) -> None:
+        if not getattr(self, "drafts", None):
+            return
+        key = self.drafts.active_key(self.convo)
+        draft = self.drafts.ensure(self.convo, key)
+        if not draft.dirty:
+            initial = slots.initial_text(self.convo, key, draft.mode)
+            if draft.text != initial:
+                draft.text = initial
+            if self.composer.text() != initial:
+                self._binding = True
+                try:
+                    self.composer.set_text(initial)
+                finally:
+                    self._binding = False
+        parent = key.parent_id
+        locked = bool(parent and self.convo.is_locked(parent))
+        view_ids = {n.id for n in self.convo.view()}
+        offscreen = bool(parent and parent not in view_ids)
+        target = (
+            f"写：{slots.layer_label(self.convo, key)} · "
+            f"{slots.base_label(self.convo, key)} · "
+            f"{slots.MODE_LABEL[draft.mode]}"
         )
-        self.composer.set_context(
-            len(view),
-            layer_count,
-            leaf.role if leaf else "",
-            pending_title,
-            elsewhere,
+        if locked:
+            target += " · 写层已锁 · 执行时先抬基准"
+        if offscreen:
+            target += " · 不在当前视图"
+        can = slots.can_send(self.convo, key, draft)
+        reason = slots.send_disabled_reason(self.convo, key, draft)
+        modes = slots.allowed_modes(self.convo, key)
+        base_user = bool(
+            key.base_id is not None
+            and key.base_id in self.convo.nodes
+            and self.convo.nodes[key.base_id].role == "user"
         )
+        self.composer.set_context(len(view_ids))
+        self.composer.set_slot_state(
+            target,
+            offscreen=offscreen,
+            locked=locked,
+            reset_enabled=draft.dirty and self._proposal_job is None,
+            mode_label=f"模式：{slots.MODE_LABEL[draft.mode]}",
+            show_mode=len(modes) > 1,
+            show_propose=base_user,
+            propose_enabled=bool(draft.text.strip()) and not (self._job or self._proposal_job),
+            can_send=can,
+            send_reason=reason,
+            placeholder=slots.MODE_PROMPT[draft.mode],
+            verb=slots.MODE_VERB[draft.mode],
+            edit_enabled=self._proposal_job is None,
+        )
+        if not self._job and not self._proposal_job:
+            self.composer.set_busy(False)
 
     def _use_suggestion(self, text: str) -> None:
-        self.composer.set_text(text)
+        key = self.drafts.active_key(self.convo)
+        self.drafts.set_text(self.convo, key, text)
+        self._binding = True
+        try:
+            self.composer.set_text(text)
+        finally:
+            self._binding = False
+        self._refresh_slot_ui()
+        self._save_slots(0)
         self.composer.focus_input()
 
     def _new_conversation(self) -> None:
@@ -322,8 +399,12 @@ class MainWindow(QMainWindow):
         self._schedule_save(320)
 
     def _draft_changed(self, text: str) -> None:
-        self.convo.ui["draft"] = text
-        self._schedule_save(450)
+        if self._binding:
+            return
+        key = self.drafts.active_key(self.convo)
+        self.drafts.set_text(self.convo, key, text)
+        self._refresh_slot_ui()
+        self._save_slots(450)
 
     def _restore_window_geometry(self) -> None:
         geo = self.settings.get("geometry")
@@ -450,7 +531,9 @@ class MainWindow(QMainWindow):
             self.convo.ui["scroll"] = self.transcript.capture()
         except Exception:
             pass
-        self.convo.ui["draft"] = self.composer.text()
+        if getattr(self, "drafts", None) is not None:
+            self.convo.ui["slots"] = self.drafts.to_ui()
+            self.convo.ui.pop("draft", None)
 
     def _open_sessions(self) -> None:
         self._snapshot_ui()
@@ -480,43 +563,48 @@ class MainWindow(QMainWindow):
             stack.extend(c.id for c in self.convo.children(cur))
         return out
 
-    # -- layer actions (all go through the four gated core methods) ----
+    # -- slot entrances ------------------------------------------------
+    def _open_tail_slot(self, parent_id: str) -> None:
+        if parent_id not in self.convo:
+            return
+        key = slots.SlotKey(parent_id, None)
+        self.drafts.open(self.convo, key)
+        self._bind_slot(load_text=True)
+        self._save_slots(0)
+        self.composer.focus_input()
+
+    def _open_slot(self, parent_id: str, base_id: str, mode: str | None = None) -> None:
+        if parent_id not in self.convo.nodes or base_id not in self.convo.nodes:
+            return
+        if self.convo.nodes[base_id].parent_id != parent_id:
+            return
+        key = slots.SlotKey(parent_id, base_id)
+        self.drafts.open(self.convo, key, mode)
+        self._bind_slot(load_text=True)
+        self._save_slots(0)
+        self.composer.focus_input()
+
+    def _open_slot_signal(self, parent_id: str, base_id: str, mode: str) -> None:
+        self._open_slot(parent_id, base_id, mode)
+
+    # -- layer actions (all through commands) ---------------------------
     def _activate(self, parent_id: str, child_id: str) -> None:
         if parent_id not in self.convo or child_id not in self.convo:
             return
-        if self.convo.is_locked(parent_id):
-            self._ask_unlock(parent_id)
-            return
         state = self.transcript.capture_key("l:" + parent_id)
         try:
-            self.convo.activate(parent_id, child_id)
+            commands.set_active(self.convo, parent_id, child_id)
         except LayerLocked:
             self._ask_unlock(parent_id)
             return
-        except (KeyError, ValueError):
+        except (KeyError, ValueError, ScopeError):
             return
-        self._pending_parent_id = None
+        # Active slot is sticky: changing the view does not retarget the input.
         self.transcript.rebuild(restore=state)
         self._refresh_meta()
         self.atlas.refresh()
-        self._update_context()
         self._schedule_save(120)
         self.composer.focus_input()
-
-    def _new_at_layer(self, parent_id: str) -> None:
-        if parent_id not in self.convo:
-            return
-        if self.convo.is_locked(parent_id):
-            self._ask_unlock(parent_id)
-            return
-        node = self.convo.nodes[parent_id]
-        if node.role == "user":
-            self._begin_answer(parent_id)
-            return
-        self._pending_parent_id = parent_id
-        self._update_context()
-        self.composer.focus_input()
-        self.composer.set_busy(bool(self._job))
 
     def _close_tab(self, parent_id: str, child_id: str) -> None:
         if parent_id not in self.convo or child_id not in self.convo:
@@ -526,39 +614,48 @@ class MainWindow(QMainWindow):
             return
         doomed = self._subtree_ids(child_id)
         count = len(doomed)
-        detail = "只删除这一支；其它标签与消息不受影响。"
+        detail = "只删除这一支；其它标签与消息不受影响。此操作不可撤销。"
         if count > 1:
-            detail = f"将删除这一支和它的 {count - 1} 条后续。其它标签与消息不受影响。"
+            detail = (
+                f"将删除这一支和它的 {count - 1} 条后续。其它标签与消息不受影响。"
+                "此操作不可撤销。"
+            )
         dlg = ConfirmDialog(self, title="关闭这一支？", detail=detail, confirm="删除", danger=True)
         if dlg.exec() != QDialog.DialogCode.Accepted:
             return
         if self._job and self._active_node_id in doomed:
             self._stop_generation(silent=True, notify=False)
+        if self._proposal_job is not None:
+            self._stop_generation(silent=True, notify=False)
         state = self.transcript.capture_key("l:" + parent_id)
         try:
-            removed = self.convo.close(parent_id, child_id)
+            removed = commands.close(self.convo, parent_id, child_id)
         except LayerLocked:
             self._ask_unlock(parent_id)
             return
-        except (KeyError, ValueError):
+        except (KeyError, ValueError, ScopeError):
             return
-        if self._pending_parent_id in doomed:
-            self._pending_parent_id = None
+        before = self.drafts.active
+        self.drafts.prune(self.convo)
         self.transcript.rebuild(restore=state)
         self._refresh_stack()
         self._refresh_meta()
         self.atlas.refresh()
-        self._update_context()
+        if self.drafts.active != before or self.drafts.active is None:
+            self._bind_slot(load_text=True)
+        else:
+            self._refresh_slot_ui()
+        self._save_slots(0)
         self._save_now()
         self.toast.show_message(f"已关闭 {removed} 条消息", "ok")
 
     def _reorder(self, parent_id: str, child_id: str, index: int) -> None:
         try:
-            self.convo.reorder(parent_id, child_id, index)
+            commands.reorder(self.convo, parent_id, child_id, index)
         except LayerLocked:
             self._ask_unlock(parent_id)
             return
-        except (KeyError, ValueError):
+        except (KeyError, ValueError, ScopeError):
             return
         self.transcript.refresh_layer(parent_id)
         self._schedule_save(120)
@@ -580,6 +677,7 @@ class MainWindow(QMainWindow):
         )
         if dlg.exec() == QDialog.DialogCode.Accepted:
             self._set_baseline(parent_id)
+            self._refresh_slot_ui()
 
     def _card_menu(self, node_id: str, global_pos) -> None:
         node = self.convo.nodes.get(node_id)
@@ -596,7 +694,22 @@ class MainWindow(QMainWindow):
         parent_id = node.parent_id
         if parent_id is not None:
             menu.addSeparator()
-            menu.addAction("在这一层新建…", lambda *_: self._new_at_layer(parent_id))
+            menu.addAction("在这一层新建…", lambda *_: self._open_tail_slot(parent_id))
+            if node.role == "user":
+                menu.addAction(
+                    "以这一支为底稿改问",
+                    lambda *_: self._open_slot(parent_id, node_id, slots.REVISE_QUESTION),
+                )
+            else:
+                menu.addAction(
+                    "按意见改（模型）",
+                    lambda *_: self._open_slot(parent_id, node_id, slots.REWRITE_ANSWER),
+                )
+                menu.addAction(
+                    "自己改（不调模型）",
+                    lambda *_: self._open_slot(parent_id, node_id, slots.EDIT_ANSWER),
+                )
+            menu.addSeparator()
             menu.addAction("关闭这一支…", lambda *_: self._close_tab(parent_id, node_id))
             if self.convo.is_locked(parent_id):
                 menu.addAction("这一层已锁 · 抬基准…", lambda *_: self._ask_unlock(parent_id))
@@ -609,36 +722,162 @@ class MainWindow(QMainWindow):
         QApplication.clipboard().setText(node.text)
         self.toast.show_message("已复制这条消息", "ok", 1400)
 
-    def _begin_answer(self, parent_id: str) -> None:
-        if self._job:
-            self.toast.show_message("正在生成，先停止或等待完成", "error", 1600)
+    # -- slot actions ---------------------------------------------------
+    def _locate_write_layer(self) -> None:
+        key = self.drafts.active_key(self.convo)
+        if key.parent_id is not None and key.parent_id in self.convo.nodes:
+            if key.parent_id not in {n.id for n in self.convo.view()}:
+                self._set_baseline(key.parent_id)
+
+    def _reset_slot(self) -> None:
+        if self._proposal_job is not None:
             return
-        if parent_id not in self.convo:
+        key = self.drafts.active_key(self.convo)
+        draft = self.drafts.reset(self.convo, key)
+        self._binding = True
+        try:
+            self.composer.set_text(draft.text)
+        finally:
+            self._binding = False
+        self._refresh_slot_ui()
+        self._save_slots(0)
+
+    def _slot_mode_menu(self) -> None:
+        if self._proposal_job is not None:
             return
-        if self.convo.is_locked(parent_id):
-            self._ask_unlock(parent_id)
+        key = self.drafts.active_key(self.convo)
+        draft = self.drafts.ensure(self.convo, key)
+        modes = slots.allowed_modes(self.convo, key)
+        if len(modes) < 2 and draft.snapshot is None:
+            return
+        menu = QMenu(self)
+        menu.setStyleSheet(
+            f"QMenu {{ background:{C.panel_hi}; color:{C.ink_dim}; border:1px solid {C.line}; padding:4px; }}"
+            f"QMenu::item {{ padding:6px 18px; border-radius:4px; }}"
+            f"QMenu::item:selected {{ background:{C.raised}; color:{C.ink}; }}"
+            f"QMenu::separator {{ height:1px; background:{C.line}; margin:4px 6px; }}"
+        )
+        for mode in modes:
+            prefix = "✓ " if mode == draft.mode else "   "
+            menu.addAction(
+                prefix + slots.MODE_LABEL[mode],
+                lambda *_, m=mode: self._switch_slot_mode(m),
+            )
+        if draft.snapshot is not None:
+            menu.addSeparator()
+            menu.addAction("撤销上次切换", lambda *_: self._undo_slot_mode())
+        pos = self.composer._mode_btn.mapToGlobal(self.composer._mode_btn.rect().bottomLeft())
+        menu.exec(pos)
+
+    def _switch_slot_mode(self, mode: str) -> None:
+        key = self.drafts.active_key(self.convo)
+        draft = self.drafts.ensure(self.convo, key)
+        if mode == draft.mode:
+            return
+        if draft.dirty:
+            dlg = ConfirmDialog(
+                self,
+                title="切换模式？",
+                detail=(
+                    "当前草稿会被新模式替换；切换本身可以撤销一次，"
+                    "但之后的编辑、重置或再切一次会让这次撤销过期。"
+                ),
+                confirm="切换",
+                danger=False,
+            )
+            if dlg.exec() != QDialog.DialogCode.Accepted:
+                return
+        try:
+            self.drafts.switch_mode(self.convo, key, mode, confirm=True)
+        except slots.SlotError:
+            return
+        self._bind_slot(load_text=True)
+        self._save_slots(0)
+
+    def _undo_slot_mode(self) -> None:
+        key = self.drafts.active_key(self.convo)
+        self.drafts.undo_switch(self.convo, key)
+        self._bind_slot(load_text=True)
+        self._save_slots(0)
+
+    def _propose_question(self) -> None:
+        if self._job or self._proposal_job:
+            self.toast.show_message("先等当前生成结束", "error", 1600)
+            return
+        key = self.drafts.active_key(self.convo)
+        if key.base_id is None or key.base_id not in self.convo.nodes:
+            return
+        if self.convo.nodes[key.base_id].role != "user":
+            return
+        text = self.composer.text().strip()
+        if not text:
             return
         if not self._ensure_key():
             return
-        try:
-            assistant = self.convo.answer(parent_id)
-        except LayerLocked:
-            self._ask_unlock(parent_id)
-            return
-        except ValueError:
-            return
-        messages = chain_messages(self.convo, parent_id)
+        messages = slots.propose_question_messages(self.convo, key, text)
         if not messages:
             return
-        self._pending_parent_id = None
-        self._begin_job(assistant.id, parent_id, messages, self.convo.model)
-        self._refresh_stack()
-        self.transcript.rebuild(keep_bottom=True)
-        self.transcript.scroll_to_bottom()
-        self._refresh_meta()
-        self.atlas.refresh()
-        self._save_now()
-        QTimer.singleShot(0, self.transcript.scroll_to_bottom)
+        self._proposal_job = StreamJob(self.client, messages, self.convo.model)
+        self._proposal_job.start()
+        self._proposal_key = key
+        self._proposal_text = []
+        self._proposal_pump.start()
+        self.composer.set_busy(True)
+        self.composer.set_edit_enabled(False)
+        self.header.set_busy(True)
+        self._refresh_slot_ui()
+        self.notice.hide()
+
+    def _drain_proposal(self) -> None:
+        if self._proposal_job is None:
+            return
+        done: StreamResult | None = None
+        while True:
+            try:
+                item = self._proposal_job.queue.get_nowait()
+            except queue.Empty:
+                break
+            if item[0] == "__done__":
+                done = item[1]
+                break
+            if item[0] == "content":
+                self._proposal_text.append(item[1])
+        if done is None:
+            return
+        key = self._proposal_key
+        self._proposal_job = None
+        self._proposal_key = None
+        self._proposal_pump.stop()
+        text = "".join(self._proposal_text).strip()
+        self._proposal_text = []
+        self._set_idle()
+        self.composer.set_edit_enabled(True)
+        if (
+            done.status == "complete"
+            and text
+            and key is not None
+            and slots.slot_valid(self.convo, key)
+            and key.base_id is not None
+            and key.base_id in self.convo.nodes
+            and self.convo.nodes[key.base_id].role == "user"
+        ):
+            draft = self.drafts.ensure(self.convo, key)
+            if draft.mode == slots.REVISE_QUESTION:
+                draft.text = text.strip().strip('"').strip("“”").strip()
+                draft.dirty = True
+                draft.snapshot = None
+                if self.drafts.active_key(self.convo) == key:
+                    self._bind_slot(load_text=True)
+                else:
+                    self._refresh_slot_ui()
+                self._save_slots(0)
+                self.toast.show_message("已替换草稿 · 没有落节点", "ok", 1800)
+                return
+        if done.status == "error" and done.error is not None:
+            self.toast.show_message(f"{error_title(done.error.kind)} · 草稿保留", "error", 2000)
+        else:
+            self.toast.show_message("改写没有结果 · 草稿保留", "error", 1800)
+        self._refresh_slot_ui()
 
     # -- generation ----------------------------------------------------
     def _missing_key_notice(self) -> None:
@@ -659,46 +898,53 @@ class MainWindow(QMainWindow):
         return False
 
     def _send(self, text: str) -> None:
-        if self._job:
+        if self._job or self._proposal_job:
             return
-        text = text.strip()
-        if not text:
+        key = self.drafts.active_key(self.convo)
+        draft = self.drafts.ensure(self.convo, key)
+        if text != draft.text:
+            self.drafts.set_text(self.convo, key, text)
+        if not slots.can_send(self.convo, key, draft):
+            self._refresh_slot_ui()
             return
-        if not self._ensure_key():
+        needs_model = draft.mode != slots.EDIT_ANSWER
+        if needs_model and not self._ensure_key():
             return
-        pending = self._pending_parent_id
-        model = self.convo.model
         try:
-            if pending and pending in self.convo:
-                user, assistant = self.convo.ask(pending, text)
-            else:
-                user, assistant = self.convo.send(text)
-        except SendBlocked:
-            self._update_context()
-            self.toast.show_message("这一支停在你的提问上；用这一层的 ＋ 生成回答", "error", 2400)
-            return
+            run = slots.execute_slot(self.convo, key, draft)
         except LayerLocked:
-            self._pending_parent_id = None
-            self._update_context()
-            self.toast.show_message("这一层已锁；没有写入", "error", 2200)
+            self._ask_unlock(slots.write_layer(self.convo, key))
+            self._refresh_slot_ui()
             return
-        except (KeyError, ValueError):
-            self._pending_parent_id = None
-            self._update_context()
+        except slots.CannotSend:
+            self._refresh_slot_ui()
             return
-        messages = chain_messages(self.convo, user.id)
-        if not messages:
+        except (ScopeError, KeyError, ValueError) as exc:
+            self.toast.show_message(f"没有写入：{exc}", "error", 2200)
+            self._refresh_slot_ui()
             return
-        self._pending_parent_id = None
-        self.convo.ui["draft"] = ""
-        self.composer.clear()
+        self.drafts.consume(self.convo, key)
+        self.drafts.active = slots.default_key(self.convo)
+        self.drafts.ensure(self.convo, self.drafts.active)
         self._refresh_stack()
-        self._begin_job(assistant.id, user.id, messages, model)
+        if run.needs_model and run.assistant_id:
+            self._begin_job(run.assistant_id, run.question_id or "", run.messages, run.model)
+        else:
+            self._set_idle()
         self.transcript.rebuild(keep_bottom=True)
         self.transcript.scroll_to_bottom()
         self._refresh_meta()
         self.atlas.refresh()
+        self._bind_slot(load_text=True)
+        self._save_slots(0)
         self._save_now()
+        if run.write_layer != ROOT_SCOPE:
+            viewed = {n.id for n in self.convo.view()}
+            layer = self.convo.nodes.get(run.write_layer)
+            if layer is not None and run.write_layer not in viewed:
+                self.toast.show_message(
+                    f"已写入「{one_line(layer.text, 16) or '层'}」· 不在当前视图", "ok", 2200
+                )
         QTimer.singleShot(0, self.transcript.scroll_to_bottom)
 
     def _begin_job(self, assistant_id: str, parent_id: str, messages: list[dict[str, str]], model: str) -> None:
@@ -711,7 +957,7 @@ class MainWindow(QMainWindow):
         self.header.set_busy(True)
         self._pump.start()
         self._stream_save.start()
-        self._update_context()
+        self._refresh_slot_ui()
         self.notice.hide()
         self.composer.focus_input()
 
@@ -741,6 +987,11 @@ class MainWindow(QMainWindow):
         if content or reasoning:
             self.convo.append_stream(node_id, "".join(content), "".join(reasoning))
             self.transcript.update_stream(node_id)
+            key = self.drafts.active_key(self.convo)
+            if key.base_id == node_id:
+                draft = self.drafts.ensure(self.convo, key)
+                if not draft.dirty:
+                    self._refresh_slot_ui()
         if done is not None:
             self._finish_result(done)
 
@@ -837,8 +1088,13 @@ class MainWindow(QMainWindow):
         return False
 
     def _drop_empty_node(self, node_id: str) -> None:
-        """Remove a placeholder that never received content (not a layer close)."""
-        self.convo.abandon(node_id)
+        """Remove a placeholder that never received content (a declared repair)."""
+        try:
+            commands.repair_empty(self.convo, node_id)
+        except (LayerLocked, ScopeError):
+            node = self.convo.nodes.get(node_id)
+            if node is not None:
+                self.convo.finish_node(node_id, "error", error_kind="empty")
 
     def _refresh_parent_layer(self, node_id: str) -> None:
         node = self.convo.nodes.get(node_id)
@@ -846,10 +1102,20 @@ class MainWindow(QMainWindow):
             self.transcript.refresh_layer(node.parent_id, text_only=True)
 
     def _stop_generation(self, *, silent: bool = False, notify: bool = True) -> None:
+        if self._proposal_job is not None:
+            job = self._proposal_job
+            self._proposal_job = None
+            self._proposal_key = None
+            job.cancel.set()
+            self._proposal_pump.stop()
+            self._proposal_text = []
+            self._set_idle()
+            self.composer.set_edit_enabled(True)
+            self._refresh_slot_ui()
+            if notify and not silent:
+                self.toast.show_message("已停止改写 · 草稿保留", "ok", 1600)
+            return
         if not self._job:
-            if self._pending_parent_id:
-                self._pending_parent_id = None
-                self._update_context()
             return
         job = self._job
         node_id = self._active_node_id
@@ -898,7 +1164,7 @@ class MainWindow(QMainWindow):
         self.composer.set_busy(False)
         self.header.set_busy(False)
         self._stream_save.stop()
-        self._update_context()
+        self._refresh_slot_ui()
 
     def _show_stream_notice(self, err: StreamError, parent_id: str | None) -> None:
         detail = error_detail(err.kind, err.message)
@@ -921,13 +1187,15 @@ class MainWindow(QMainWindow):
 
     def _retry_parent(self, parent_id: str) -> None:
         self.notice.hide()
-        self._begin_answer(parent_id)
+        self._open_tail_slot(parent_id)
+        self.toast.show_message("在这一层按发送重新生成", "ok", 1800)
 
     def _fix_key_and_retry(self, parent_id: str) -> None:
         self._show_info()
         if self.client.api_key and parent_id in self.convo:
             self.notice.hide()
-            self._begin_answer(parent_id)
+            self._open_tail_slot(parent_id)
+            self.toast.show_message("在这一层按发送重新生成", "ok", 1800)
         elif not self.client.api_key:
             self._missing_key_notice()
 
@@ -937,13 +1205,11 @@ class MainWindow(QMainWindow):
             return
         if self.convo.baseline_id == node_id:
             return
-        self._pending_parent_id = None
         self.convo.set_baseline(node_id)
         self.transcript.rebuild(keep_bottom=False)
         self.transcript.scroll_to_node(node_id)
         self._refresh_meta()
         self.atlas.refresh()
-        self._update_context()
         self._schedule_save(120)
         node = self.convo.nodes[node_id]
         self.toast.show_message(f"基准 →「{one_line(node.text, 16)}」· 锁集已更新", "ok", 1800)
@@ -979,7 +1245,7 @@ class MainWindow(QMainWindow):
         changed = self.convo.converge(confirm=True)
         self._schedule_save(120)
         self._refresh_meta()
-        self._update_context()
+        self._save_slots(0)
         self.toast.show_message(f"已写入 {changed} 处默认 · 回到默认路线后会到同一处", "ok", 2400)
 
     # -- shutdown ------------------------------------------------------
@@ -990,5 +1256,6 @@ class MainWindow(QMainWindow):
         self._save_now()
         self._save_window()
         self._pump.stop()
+        self._proposal_pump.stop()
         self._save_timer.stop()
         event.accept()

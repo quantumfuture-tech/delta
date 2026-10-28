@@ -1,6 +1,7 @@
 """Schema 1 -> 2: the old pointer becomes a default route, not a hidden position."""
 import pytest
 
+from delta.core import commands
 from delta.core.model import Conversation, SCHEMA
 
 
@@ -69,7 +70,7 @@ def test_missing_pointer_keeps_the_old_default_route():
 def test_schema_2_roundtrip_preserves_baseline_and_display_order():
     c = Conversation.from_dict(_v1("u1"))
     c.set_baseline("a1")
-    c.reorder("u1", "b2", 0)
+    commands.reorder(c, "u1", "b2", 0)
     again = Conversation.from_dict(c.to_dict())
     assert again.baseline_id == "a1"
     assert again.display_ids("u1") == ["b2", "b1"]
