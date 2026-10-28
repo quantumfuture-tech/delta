@@ -15,19 +15,18 @@ from PySide6.QtGui import QLinearGradient, QPainter
 from PySide6.QtWidgets import QHBoxLayout, QScrollArea, QSizePolicy, QVBoxLayout, QWidget
 
 from ..core.model import Conversation
-from .forkbar import ForkBar
+from .forkbar import LayerBar
 from .message import MessageCard
 from .theme import C, color
 
 
 class TranscriptView(QScrollArea):
-    fork_requested = Signal(str)
-    delete_requested = Signal(str)
-    retry_requested = Signal(str)
-    focus_requested = Signal(str)
-    switch_requested = Signal(str, str)
-    preferred_toggled = Signal(str, str)
-    fork_here_requested = Signal(str)
+    activate_requested = Signal(str, str)
+    new_requested = Signal(str)
+    close_requested = Signal(str, str)
+    reorder_requested = Signal(str, str, int)
+    baseline_requested = Signal(str)
+    menu_requested = Signal(str, QPoint)
     typing_started = Signal()
     notice = Signal(str, str)
     view_moved = Signal(dict)
@@ -37,7 +36,7 @@ class TranscriptView(QScrollArea):
         self.convo: Conversation | None = None
         self._rows: list[tuple[str, QWidget]] = []
         self._cards: dict[str, MessageCard] = {}
-        self._forks: dict[str, ForkBar] = {}
+        self._layers: dict[str, LayerBar] = {}
         self._cache: "OrderedDict[str, QWidget]" = OrderedDict()
         self._cache_host = QWidget(self)
         self._cache_host.hide()
@@ -91,7 +90,7 @@ class TranscriptView(QScrollArea):
         self.convo = convo
         self._clear_rows()
         self._cards.clear()
-        self._forks.clear()
+        self._layers.clear()
         self._pending_restore = restore
         self._restore_tries = 0
         self._at_bottom = bool(restore.get("at_bottom", False)) if restore else True
@@ -134,17 +133,34 @@ class TranscriptView(QScrollArea):
         c = self.convo
         if c is None:
             return []
-        chain = c.chain()
+        chain = c.view()
         rows: list[tuple[str, tuple]] = []
+        last = len(chain) - 1
         for i, node in enumerate(chain):
-            rows.append(("n:" + node.id, ("node", node, i == len(chain) - 1)))
-            kids = c.children(node.id)
-            last = i == len(chain) - 1
-            if last and kids:
-                rows.append(("f:" + node.id, ("fork", node.id, None)))
-            elif not last and len(kids) > 1:
-                rows.append(("f:" + node.id, ("fork", node.id, chain[i + 1].id)))
+            rows.append(("n:" + node.id, ("node", node, i == last)))
+            if self._show_layer(node.id, i == last):
+                active = chain[i + 1].id if i < last else None
+                rows.append(("l:" + node.id, ("layer", node.id, active)))
         return rows
+
+    def _show_layer(self, parent_id: str, is_leaf: bool) -> bool:
+        """A strip is the entrance to a layer; hide only the single-child detour.
+
+        A single-child layer in the middle of the view uses the card context
+        menu this round; the connected tab form is the next round's visual.
+        The leaf's layer is shown when it has tabs to pick or when the view
+        stops on a question (the + is then the only way to get an answer).
+        """
+        if self.convo is None:
+            return False
+        count = len(self.convo.children(parent_id))
+        if count >= 2:
+            return True
+        if not is_leaf:
+            return False
+        if count >= 1:
+            return True
+        return self.convo.nodes[parent_id].role == "user"
 
     def rebuild(self, *, restore: dict | None = None, keep_bottom: bool | None = None) -> None:
         if self.convo is None:
@@ -178,7 +194,7 @@ class TranscriptView(QScrollArea):
             w.setParent(None)
             w.deleteLater()
         self._cards = {k[2:]: w for k, w in self._rows if k.startswith("n:") and isinstance(w, MessageCard)}
-        self._forks = {k[2:]: w for k, w in self._rows if k.startswith("f:") and isinstance(w, ForkBar)}
+        self._layers = {k[2:]: w for k, w in self._rows if k.startswith("l:") and isinstance(w, LayerBar)}
 
         if restore is not None:
             self._pending_restore = restore
@@ -191,49 +207,47 @@ class TranscriptView(QScrollArea):
     def _make_widget(self, key: str, desc: tuple) -> QWidget:
         cached = self._reuse(key)
         if desc[0] == "node":
-            _, node, pointer = desc
+            _, node, current = desc
             if isinstance(cached, MessageCard) and cached.node is node:
                 cached.refresh()
-                cached.set_pointer(pointer)
+                cached.set_current(current)
                 return cached
             if cached is not None:
                 cached.setParent(None)
                 cached.deleteLater()
-            card = MessageCard(node, pointer=pointer)
-            card.fork_requested.connect(self.fork_requested)
-            card.delete_requested.connect(self.delete_requested)
-            card.retry_requested.connect(self.retry_requested)
-            card.focus_requested.connect(self.focus_requested)
+            card = MessageCard(node, current=current)
             card.copy_requested.connect(lambda _nid: self.notice.emit("已复制这条消息", "ok"))
+            card.menu_requested.connect(self.menu_requested)
             card.body.typing_started.connect(self.typing_started)
             return card
         _, parent_id, active = desc
-        if isinstance(cached, ForkBar):
+        if isinstance(cached, LayerBar):
             cached.refresh(active)
             return cached
         if cached is not None:
             cached.setParent(None)
             cached.deleteLater()
-        bar = ForkBar(self.convo, parent_id, active_child=active)
-        bar.switch_requested.connect(self.switch_requested)
-        bar.preferred_toggled.connect(self.preferred_toggled)
-        bar.fork_here_requested.connect(self.fork_here_requested)
+        bar = LayerBar(self.convo, parent_id, active_child=active)
+        bar.activate_requested.connect(self.activate_requested)
+        bar.new_requested.connect(self.new_requested)
+        bar.close_requested.connect(self.close_requested)
+        bar.reorder_requested.connect(self.reorder_requested)
+        bar.baseline_requested.connect(self.baseline_requested)
         return bar
 
     def _refresh_existing(self, spec_prefix: list[tuple]) -> None:
         if self.convo is None:
             return
-        pointer = self.convo.pointer_id
+        leaf = self.convo.view_leaf()
+        ids = [n.id for n in self.convo.view()]
         for key, _ in spec_prefix:
             w = dict(self._rows).get(key)
             if w is None:
                 continue
             if key.startswith("n:") and isinstance(w, MessageCard):
-                w.set_pointer(key[2:] == pointer)
-            elif key.startswith("f:") and isinstance(w, ForkBar):
+                w.set_current(key[2:] == leaf)
+            elif key.startswith("l:") and isinstance(w, LayerBar):
                 parent_id = key[2:]
-                chain = self.convo.chain()
-                ids = [n.id for n in chain]
                 idx = ids.index(parent_id) if parent_id in ids else -1
                 active = ids[idx + 1] if 0 <= idx < len(ids) - 1 else None
                 w.refresh(active)
@@ -250,19 +264,18 @@ class TranscriptView(QScrollArea):
         card = self._cards.get(node_id)
         if card is not None:
             card.refresh()
-            card.set_pointer(self.convo.pointer_id == node_id if self.convo else False)
+            card.set_current(self.convo.view_leaf() == node_id if self.convo else False)
             if self._at_bottom:
                 self._bottom_timer.start()
 
-    def refresh_fork(self, parent_id: str, *, text_only: bool = False) -> None:
-        bar = self._forks.get(parent_id)
+    def refresh_layer(self, parent_id: str, *, text_only: bool = False) -> None:
+        bar = self._layers.get(parent_id)
         if bar is None or self.convo is None:
             return
         if text_only:
             bar.refresh_texts()
             return
-        chain = self.convo.chain()
-        ids = [n.id for n in chain]
+        ids = [n.id for n in self.convo.view()]
         idx = ids.index(parent_id) if parent_id in ids else -1
         active = ids[idx + 1] if 0 <= idx < len(ids) - 1 else None
         bar.refresh(active)

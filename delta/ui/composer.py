@@ -282,6 +282,8 @@ class Composer(QWidget):
         super().__init__(parent)
         self._busy = False
         self._note_kind = ""
+        self._leaf_role = ""
+        self._pending_title = ""
         self.setMaximumWidth(890)
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         root = QVBoxLayout(self)
@@ -371,21 +373,32 @@ class Composer(QWidget):
     def set_model(self, model: str) -> None:
         self.model_chip.set_model(model)
 
-    def set_context(self, count: int, has_children: bool, children: int, busy_elsewhere: bool = False) -> None:
+    def set_context(
+        self,
+        count: int,
+        layer_count: int = 0,
+        leaf_role: str = "",
+        pending_title: str = "",
+        busy_elsewhere: bool = False,
+    ) -> None:
         self._context_count = count
-        self._has_children = has_children
-        self._child_count = children
+        self._has_children = layer_count > 1
+        self._child_count = layer_count
+        self._leaf_role = leaf_role
+        self._pending_title = pending_title
         self._elsewhere = busy_elsewhere
         parts = [f"{count} 条上下文"] if count else []
-        if has_children:
-            parts.append(f"此处有 {children} 个后续")
+        if layer_count:
+            parts.append(f"这一层 {layer_count} 支")
         self.context_label.setText(" · ".join(parts))
         self._update_note()
         self._update_placeholder()
 
     def _placeholder_text(self) -> str:
-        if getattr(self, "_has_children", False):
-            return "从这条消息开一条新支…"
+        if getattr(self, "_pending_title", ""):
+            return f"写下要接在「{self._pending_title}」之后的新问题…"
+        if getattr(self, "_leaf_role", "") == "user":
+            return "这一支还没有回答；用这一层的 + 生成"
         return "写下你的下一条…"
 
     def _update_placeholder(self) -> None:
@@ -398,8 +411,11 @@ class Composer(QWidget):
         if getattr(self, "_elsewhere", False):
             text = "另一分支正在生成 · 这里的改动不会串线"
             kind = "live"
-        elif getattr(self, "_has_children", False):
-            text = "发送会从当前节点开一条新支，旧的都不会被改动"
+        if getattr(self, "_pending_title", ""):
+            text = f"新问题将接在「{self._pending_title}」之后 · Esc 取消"
+            kind = "branch"
+        elif getattr(self, "_leaf_role", "") == "user":
+            text = "这一支停在你的提问上；用这一层的 ＋ 生成回答"
             kind = "branch"
         if self._busy:
             text = "正在生成 · 已收到的内容会实时保留"

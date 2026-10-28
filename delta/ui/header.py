@@ -47,6 +47,8 @@ class Header(QWidget):
     shortcuts = Signal()
     about = Signal()
     menu_requested = Signal()
+    reset_requested = Signal()
+    converge_requested = Signal()
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
@@ -145,6 +147,9 @@ class Header(QWidget):
         menu = QMenu(self)
         menu.addAction("重命名", self.begin_rename)
         menu.addAction("在资源管理器中打开数据目录", self.open_data)
+        menu.addSeparator()
+        menu.addAction("回到默认路线", self.reset_requested.emit)
+        menu.addAction("把捷径写进默认…", self.converge_requested.emit)
         menu.addSeparator()
         menu.addAction("键盘快捷键", self.shortcuts)
         menu.addAction("关于 Delta", self.about)

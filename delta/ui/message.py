@@ -1,9 +1,9 @@
-"""One message: a card on the spine, with alternates handled by ForkBar."""
+"""One message: a card on the spine; the layer strip above it handles alternates."""
 from __future__ import annotations
 
 import math
 
-from PySide6.QtCore import QRectF, Qt, QTimer, Signal
+from PySide6.QtCore import QPoint, QRectF, Qt, QTimer, Signal
 from PySide6.QtGui import QColor, QFontMetrics, QPainter, QPainterPath, QPen
 from PySide6.QtWidgets import (
     QApplication,
@@ -48,8 +48,8 @@ def error_detail(kind: str | None, fallback: str = "") -> str:
     detail = {
         "auth": "检查 DEEPSEEK_API_KEY 后重启 Delta。",
         "rate_limit": "稍等片刻，或换一个模型再试。",
-        "timeout": "已保留收到的内容。可以直接重试为新分支。",
-        "connection": "已保留收到的内容。可以直接重试为新分支。",
+        "timeout": "已保留收到的内容。可以在这一层的 + 重新生成。",
+        "connection": "已保留收到的内容。可以在这一层的 + 重新生成。",
         "server": "上游服务暂时不可用，已保留收到的内容。",
         "bad_request": "请求格式未被接受。",
         "protocol": "流式事件解析失败，已保留收到的内容。",
@@ -198,18 +198,15 @@ class ReasoningHeader(QWidget):
 
 class MessageCard(QWidget):
     copy_requested = Signal(str)
-    fork_requested = Signal(str)
-    delete_requested = Signal(str)
-    retry_requested = Signal(str)
-    focus_requested = Signal(str)
+    menu_requested = Signal(str, QPoint)
 
     GUTTER = 44
 
-    def __init__(self, node: Node, *, pointer: bool = False, parent=None) -> None:
+    def __init__(self, node: Node, *, current: bool = False, parent=None) -> None:
         super().__init__(parent)
         self.node = node
         self.node_id = node.id
-        self._pointer = pointer
+        self._current = current
         self._hover = False
         self._phase = 0.0
         self._reasoning_open = False
@@ -271,13 +268,7 @@ class MessageCard(QWidget):
         al.setContentsMargins(0, 0, 0, 0)
         al.setSpacing(0)
         self.btn_copy = IconButton("copy", self.actions, size=26, icon_size=14, tip="复制原文", color_=C.muted)
-        self.btn_fork = IconButton("fork", self.actions, size=26, icon_size=15, tip="从这条消息分叉", color_=C.muted)
-        self.btn_delete = IconButton("trash", self.actions, size=26, icon_size=14, tip="删除消息及其后续", color_=C.muted)
-        self.btn_retry = None
-        self._action_buttons = [self.btn_copy, self.btn_fork, self.btn_delete]
-        if self.node.role == "assistant":
-            self.btn_retry = IconButton("refresh", self.actions, size=26, icon_size=14, tip="作为新分支重试", color_=C.muted)
-            self._action_buttons.append(self.btn_retry)
+        self._action_buttons = [self.btn_copy]
         for b in self._action_buttons:
             al.addWidget(b)
         self.actions.setFixedWidth(26 * len(self._action_buttons))
@@ -311,10 +302,6 @@ class MessageCard(QWidget):
         self.panel_lay.addWidget(self.footer)
 
         self.btn_copy.clicked.connect(self._copy)
-        self.btn_fork.clicked.connect(lambda: self.fork_requested.emit(self.node_id))
-        self.btn_delete.clicked.connect(lambda: self.delete_requested.emit(self.node_id))
-        if self.btn_retry is not None:
-            self.btn_retry.clicked.connect(lambda: self.retry_requested.emit(self.node_id))
         self.reasoning_header.clicked.connect(self._toggle_reasoning)
         self.body.typing_started.connect(self._focus_composer)
 
@@ -431,12 +418,9 @@ class MessageCard(QWidget):
                 tag.setStyleSheet(f"color:{C.danger}; background:transparent; font-size:9pt;")
                 info = QLabel(f"已保留 {fmt_count(len(n.text))} 字", self.footer)
                 info.setStyleSheet(f"color:{C.muted}; background:transparent; font-size:9pt;")
-                btn = PillButton("重试为新分支", self.footer)
-                btn.clicked.connect(lambda: self.retry_requested.emit(self.node_id))
                 self.footer_lay.addWidget(tag)
                 self.footer_lay.addWidget(info)
                 self.footer_lay.addStretch(1)
-                self.footer_lay.addWidget(btn)
                 self.footer.setVisible(True)
             elif n.error_kind:
                 icon = QLabel("!", self.footer)
@@ -449,21 +433,15 @@ class MessageCard(QWidget):
                 title.setStyleSheet(f"color:{C.danger}; background:transparent; font-size:9pt;")
                 detail = QLabel(error_detail(n.error_kind), self.footer)
                 detail.setStyleSheet(f"color:{C.muted}; background:transparent; font-size:9pt;")
-                btn = PillButton("重试", self.footer)
-                btn.clicked.connect(lambda: self.retry_requested.emit(self.node_id))
                 self.footer_lay.addWidget(icon)
                 self.footer_lay.addWidget(title)
                 self.footer_lay.addWidget(detail, 1)
-                self.footer_lay.addWidget(btn)
                 self.footer.setVisible(True)
             elif not n.text and n.role == "assistant":
                 label = QLabel("模型返回了空内容", self.footer)
                 label.setStyleSheet(f"color:{C.muted}; background:transparent; font-size:9pt;")
-                btn = PillButton("重试", self.footer)
-                btn.clicked.connect(lambda: self.retry_requested.emit(self.node_id))
                 self.footer_lay.addWidget(label)
                 self.footer_lay.addStretch(1)
-                self.footer_lay.addWidget(btn)
                 self.footer.setVisible(True)
             else:
                 self.footer.setVisible(False)
@@ -478,8 +456,10 @@ class MessageCard(QWidget):
     def _focus_composer(self) -> None:
         self.window().composer.focus_input()  # type: ignore[attr-defined]
 
-    def set_pointer(self, pointer: bool) -> None:
-        self._pointer = pointer
+    def set_current(self, current: bool) -> None:
+        if self._current == current:
+            return
+        self._current = current
         self.update()
 
     def _start_pulse(self) -> None:
@@ -515,21 +495,9 @@ class MessageCard(QWidget):
         self.update()
         super().leaveEvent(event)
 
-    def mousePressEvent(self, event) -> None:
-        if event.button() == Qt.MouseButton.LeftButton and event.position().x() < self.GUTTER:
-            self.focus_requested.emit(self.node_id)
-            event.accept()
-            return
-        super().mousePressEvent(event)
-
-    def mouseMoveEvent(self, event) -> None:
-        if event.position().x() < self.GUTTER:
-            self.setCursor(Qt.CursorShape.PointingHandCursor)
-            self._hover = True
-            self.update()
-        else:
-            self.setCursor(Qt.CursorShape.ArrowCursor)
-        super().mouseMoveEvent(event)
+    def contextMenuEvent(self, event) -> None:
+        self.menu_requested.emit(self.node_id, event.globalPos())
+        event.accept()
 
     def paintEvent(self, event) -> None:
         p = QPainter(self)
@@ -544,7 +512,7 @@ class MessageCard(QWidget):
             p.setPen(Qt.PenStyle.NoPen)
             p.setBrush(color(C.brass, 30))
             p.drawEllipse(QRectF(x - 7 - glow / 2, cy - 7 - glow / 2, 14 + glow, 14 + glow))
-        if self._pointer:
+        if self._current:
             p.setPen(Qt.PenStyle.NoPen)
             p.setBrush(color(C.brass, 28))
             p.drawEllipse(QRectF(x - 8, cy - 8, 16, 16))

@@ -2,7 +2,7 @@
 
 The transcript shows one path; this is the only place where the shape of the
 whole conversation is visible at once.  Nodes are dots, forks are diamonds, the
-current path is brass.  Click a node to stand there.
+view is brass.  Clicking a node sets the baseline there; the lock set follows.
 """
 from __future__ import annotations
 
@@ -114,7 +114,7 @@ class AtlasView(QWidget):
     def _active_ids(self) -> set[str]:
         if self.convo is None:
             return set()
-        return {n.id for n in self.convo.chain()}
+        return {n.id for n in self.convo.view()}
 
     def _node_at(self, pos: QPointF) -> str | None:
         best = None
@@ -185,7 +185,7 @@ class AtlasView(QWidget):
         active_edges = set()
         for a, b in zip(chain, chain[1:]):
             active_edges.add((a.id, b.id))
-        current = self.convo.pointer_id if self.convo else None
+        current = self.convo.view_leaf() if self.convo else None
         forks = {n.id for n in self.convo.nodes.values() if len(self.convo.children(n.id)) > 1} if self.convo else set()
 
         # edges

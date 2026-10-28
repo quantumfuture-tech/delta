@@ -23,6 +23,7 @@ from PySide6.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QMainWindow,
+    QMenu,
     QStackedWidget,
     QVBoxLayout,
     QWidget,
@@ -30,7 +31,14 @@ from PySide6.QtWidgets import (
 
 from ..core.client import ChatClient, StreamError, StreamResult
 from ..core.context import chain_messages
-from ..core.model import Conversation, DEFAULT_MODEL, MODELS, one_line
+from ..core.model import (
+    Conversation,
+    DEFAULT_MODEL,
+    MODELS,
+    LayerLocked,
+    SendBlocked,
+    one_line,
+)
 from ..core.store import Store, StoreError
 from .atlas import AtlasView
 from .composer import Composer
@@ -78,6 +86,7 @@ class MainWindow(QMainWindow):
         self._stream_started = 0.0
         self._closing = False
         self._first_show = True
+        self._pending_parent_id: str | None = None
 
         self._save_timer = QTimer(self)
         self._save_timer.setSingleShot(True)
@@ -175,18 +184,19 @@ class MainWindow(QMainWindow):
         self.header.shortcuts.connect(self._show_info)
         self.header.about.connect(self._show_info)
 
-        self.transcript.fork_requested.connect(self._fork_here)
-        self.transcript.delete_requested.connect(self._delete_node)
-        self.transcript.retry_requested.connect(self._retry_node)
-        self.transcript.focus_requested.connect(self._focus_node)
-        self.transcript.switch_requested.connect(self._switch_branch)
-        self.transcript.preferred_toggled.connect(self._toggle_preferred)
-        self.transcript.fork_here_requested.connect(self._fork_here)
+        self.transcript.activate_requested.connect(self._activate)
+        self.transcript.new_requested.connect(self._new_at_layer)
+        self.transcript.close_requested.connect(self._close_tab)
+        self.transcript.reorder_requested.connect(self._reorder)
+        self.transcript.baseline_requested.connect(self._set_baseline)
+        self.transcript.menu_requested.connect(self._card_menu)
         self.transcript.typing_started.connect(self.composer.focus_input)
         self.transcript.notice.connect(lambda text, kind: self.toast.show_message(text, kind))
         self.transcript.view_moved.connect(self._view_moved)
 
-        self.atlas.node_clicked.connect(self._atlas_click)
+        self.header.reset_requested.connect(self._reset_baseline)
+        self.header.converge_requested.connect(self._converge)
+        self.atlas.node_clicked.connect(self._set_baseline)
         self.empty_state.suggestion.connect(self._use_suggestion)
         self.composer.submit.connect(self._send)
         self.composer.stop.connect(self._stop_generation)
@@ -202,14 +212,11 @@ class MainWindow(QMainWindow):
         bind("Ctrl+N", self._new_conversation)
         bind("Ctrl+L", self._open_sessions)
         bind("Ctrl+M", lambda: self._set_atlas(not self.atlas_panel.isVisible()))
-        bind("Alt+Down", lambda: self._cycle_sibling(1))
-        bind("Alt+Up", lambda: self._cycle_sibling(-1))
-        bind("Alt+Left", self._go_parent)
-        bind("Alt+Right", self._go_preferred)
 
     # -- conversation lifecycle ----------------------------------------
     def _apply_conversation(self, convo: Conversation, *, restore_scroll: bool = True) -> None:
         self.convo = convo
+        self._pending_parent_id = None
         state = convo.ui.get("scroll") if restore_scroll else None
         self.transcript.set_conversation(convo, restore=state)
         self.atlas.set_conversation(convo)
@@ -237,15 +244,25 @@ class MainWindow(QMainWindow):
         self._update_context()
 
     def _update_context(self) -> None:
-        chain = self.convo.chain()
-        pointer = self.convo.pointer()
-        kids = self.convo.children(pointer.id) if pointer else []
+        view = self.convo.view()
+        leaf_id = self.convo.view_leaf()
+        leaf = self.convo.nodes.get(leaf_id) if leaf_id else None
+        layer_count = len(self.convo.children(leaf.id)) if leaf else 0
+        pending_title = ""
+        if self._pending_parent_id and self._pending_parent_id in self.convo:
+            pending_title = one_line(self.convo.nodes[self._pending_parent_id].text, 16)
         elsewhere = bool(
             self._job
             and self._active_node_id
-            and self._active_node_id not in {n.id for n in chain}
+            and self._active_node_id not in {n.id for n in view}
         )
-        self.composer.set_context(len(chain), bool(kids), len(kids), elsewhere)
+        self.composer.set_context(
+            len(view),
+            layer_count,
+            leaf.role if leaf else "",
+            pending_title,
+            elsewhere,
+        )
 
     def _use_suggestion(self, text: str) -> None:
         self.composer.set_text(text)
@@ -463,101 +480,165 @@ class MainWindow(QMainWindow):
             stack.extend(c.id for c in self.convo.children(cur))
         return out
 
-    def _node_in_chain(self, node_id: str) -> bool:
-        return any(n.id == node_id for n in self.convo.chain())
-
-    # -- message actions ----------------------------------------------
-    def _focus_node(self, node_id: str) -> None:
-        if node_id not in self.convo:
-            return
-        if self.convo.pointer_id == node_id:
-            return
-        self.convo.set_pointer(node_id)
-        self.transcript.rebuild(restore=None, keep_bottom=False)
-        self.transcript.scroll_to_node(node_id)
-        self._refresh_meta()
-        self.atlas.refresh()
-        self._schedule_save(150)
-
-    def _fork_here(self, node_id: str) -> None:
-        if node_id not in self.convo:
-            return
-        if self.convo.pointer_id != node_id:
-            self.convo.set_pointer(node_id)
-            self.transcript.rebuild(restore=None, keep_bottom=False)
-            self.transcript.scroll_to_node(node_id)
-            self._refresh_meta()
-            self.atlas.refresh()
-            self._schedule_save(150)
-        self._update_context()
-        self.composer.focus_input()
-        if not self.convo.is_empty() and self.convo.pointer_id == node_id:
-            self.composer.set_busy(bool(self._job))
-
-    def _switch_branch(self, parent_id: str, child_id: str) -> None:
+    # -- layer actions (all go through the four gated core methods) ----
+    def _activate(self, parent_id: str, child_id: str) -> None:
         if parent_id not in self.convo or child_id not in self.convo:
             return
-        state = self.transcript.capture_key("f:" + parent_id)
-        target = self.convo.canonical_leaf(child_id)
-        self.convo.set_pointer(target)
+        if self.convo.is_locked(parent_id):
+            self._ask_unlock(parent_id)
+            return
+        state = self.transcript.capture_key("l:" + parent_id)
+        try:
+            self.convo.activate(parent_id, child_id)
+        except LayerLocked:
+            self._ask_unlock(parent_id)
+            return
+        except (KeyError, ValueError):
+            return
+        self._pending_parent_id = None
         self.transcript.rebuild(restore=state)
         self._refresh_meta()
         self.atlas.refresh()
+        self._update_context()
         self._schedule_save(120)
         self.composer.focus_input()
 
-    def _toggle_preferred(self, parent_id: str, child_id: str) -> None:
+    def _new_at_layer(self, parent_id: str) -> None:
+        if parent_id not in self.convo:
+            return
+        if self.convo.is_locked(parent_id):
+            self._ask_unlock(parent_id)
+            return
+        node = self.convo.nodes[parent_id]
+        if node.role == "user":
+            self._begin_answer(parent_id)
+            return
+        self._pending_parent_id = parent_id
+        self._update_context()
+        self.composer.focus_input()
+        self.composer.set_busy(bool(self._job))
+
+    def _close_tab(self, parent_id: str, child_id: str) -> None:
         if parent_id not in self.convo or child_id not in self.convo:
             return
-        on = self.convo.toggle_preferred(parent_id, child_id)
-        self.transcript.refresh_fork(parent_id)
-        self._schedule_save(100)
-        self.toast.show_message(
-            "已设为首选续写 · 只改动了这一处" if on else "已取消首选续写",
-            "ok",
-            1800,
-        )
-
-    def _delete_node(self, node_id: str) -> None:
-        if node_id not in self.convo:
+        if self.convo.is_locked(parent_id):
+            self._ask_unlock(parent_id)
             return
-        count = self.convo.descendant_count(node_id) + 1
-        detail = "只会删除你明确选择的这一支；其它分支与消息不受影响。"
+        doomed = self._subtree_ids(child_id)
+        count = len(doomed)
+        detail = "只删除这一支；其它标签与消息不受影响。"
         if count > 1:
-            detail = f"将删除这条消息和它的 {count - 1} 条后续。其它分支与消息不受影响。"
-        dlg = ConfirmDialog(self, title="删除这一支？", detail=detail, confirm="删除", danger=True)
+            detail = f"将删除这一支和它的 {count - 1} 条后续。其它标签与消息不受影响。"
+        dlg = ConfirmDialog(self, title="关闭这一支？", detail=detail, confirm="删除", danger=True)
         if dlg.exec() != QDialog.DialogCode.Accepted:
             return
-        if self._job and self._active_node_id and node_id in self._subtree_ids(self._active_node_id):
+        if self._job and self._active_node_id in doomed:
             self._stop_generation(silent=True, notify=False)
-        removed = self.convo.delete_subtree(node_id)
-        self.transcript.rebuild(keep_bottom=True)
+        state = self.transcript.capture_key("l:" + parent_id)
+        try:
+            removed = self.convo.close(parent_id, child_id)
+        except LayerLocked:
+            self._ask_unlock(parent_id)
+            return
+        except (KeyError, ValueError):
+            return
+        if self._pending_parent_id in doomed:
+            self._pending_parent_id = None
+        self.transcript.rebuild(restore=state)
         self._refresh_stack()
         self._refresh_meta()
         self.atlas.refresh()
+        self._update_context()
         self._save_now()
-        self.toast.show_message(f"已删除 {removed} 条消息", "ok")
+        self.toast.show_message(f"已关闭 {removed} 条消息", "ok")
 
-    def _retry_node(self, node_id: str) -> None:
+    def _reorder(self, parent_id: str, child_id: str, index: int) -> None:
+        try:
+            self.convo.reorder(parent_id, child_id, index)
+        except LayerLocked:
+            self._ask_unlock(parent_id)
+            return
+        except (KeyError, ValueError):
+            return
+        self.transcript.refresh_layer(parent_id)
+        self._schedule_save(120)
+
+    def _ask_unlock(self, parent_id: str) -> None:
+        if parent_id not in self.convo:
+            return
+        parent = self.convo.nodes[parent_id]
+        label = one_line(parent.text, 22) or "对话开头"
+        dlg = ConfirmDialog(
+            self,
+            title="这一层在捷径链上",
+            detail=(
+                f"把基准抬到「{label}」之后，这一层的切换、新建、关闭、重排会一起恢复；"
+                "视图会按默认重新下落，允许跳。"
+            ),
+            confirm="抬基准",
+            danger=False,
+        )
+        if dlg.exec() == QDialog.DialogCode.Accepted:
+            self._set_baseline(parent_id)
+
+    def _card_menu(self, node_id: str, global_pos) -> None:
+        node = self.convo.nodes.get(node_id)
+        if node is None:
+            return
+        menu = QMenu(self)
+        menu.setStyleSheet(
+            f"QMenu {{ background:{C.panel_hi}; color:{C.ink_dim}; border:1px solid {C.line}; padding:4px; }}"
+            f"QMenu::item {{ padding:6px 18px; border-radius:4px; }}"
+            f"QMenu::item:selected {{ background:{C.raised}; color:{C.ink}; }}"
+            f"QMenu::separator {{ height:1px; background:{C.line}; margin:4px 6px; }}"
+        )
+        menu.addAction("复制", lambda: self._copy_node(node_id))
+        parent_id = node.parent_id
+        if parent_id is not None:
+            menu.addSeparator()
+            menu.addAction("在这一层新建…", lambda: self._new_at_layer(parent_id))
+            menu.addAction("关闭这一支…", lambda: self._close_tab(parent_id, node_id))
+            if self.convo.is_locked(parent_id):
+                menu.addAction("这一层已锁 · 抬基准…", lambda: self._ask_unlock(parent_id))
+        menu.exec(global_pos)
+
+    def _copy_node(self, node_id: str) -> None:
+        node = self.convo.nodes.get(node_id)
+        if node is None:
+            return
+        QApplication.clipboard().setText(node.text)
+        self.toast.show_message("已复制这条消息", "ok", 1400)
+
+    def _begin_answer(self, parent_id: str) -> None:
         if self._job:
             self.toast.show_message("正在生成，先停止或等待完成", "error", 1600)
             return
-        if node_id not in self.convo:
+        if parent_id not in self.convo:
             return
-        node = self.convo.nodes[node_id]
-        if node.role == "assistant" and node.parent_id:
-            parent = self.convo.nodes.get(node.parent_id)
-            user_parent = parent
-            model = node.model or self.convo.model
-        else:
-            user_parent = node
-            model = self.convo.model
-        if user_parent is None:
+        if self.convo.is_locked(parent_id):
+            self._ask_unlock(parent_id)
             return
-        if user_parent.role != "user":
-            self.toast.show_message("这一支的父节点不是提问，无法直接重试", "error")
+        if not self._ensure_key():
             return
-        self._begin_assistant(user_parent.id, model=model)
+        try:
+            assistant = self.convo.answer(parent_id)
+        except LayerLocked:
+            self._ask_unlock(parent_id)
+            return
+        except ValueError:
+            return
+        messages = chain_messages(self.convo, parent_id)
+        if not messages:
+            return
+        self._pending_parent_id = None
+        self._begin_job(assistant.id, parent_id, messages, self.convo.model)
+        self._refresh_stack()
+        self.transcript.rebuild(keep_bottom=True)
+        self.transcript.scroll_to_bottom()
+        self._refresh_meta()
+        self.atlas.refresh()
+        self._save_now()
+        QTimer.singleShot(0, self.transcript.scroll_to_bottom)
 
     # -- generation ----------------------------------------------------
     def _missing_key_notice(self) -> None:
@@ -585,37 +666,34 @@ class MainWindow(QMainWindow):
             return
         if not self._ensure_key():
             return
+        pending = self._pending_parent_id
         model = self.convo.model
-        user = self.convo.add_user(text, model=model, move=True)
+        try:
+            if pending and pending in self.convo:
+                user, assistant = self.convo.ask(pending, text)
+            else:
+                user, assistant = self.convo.send(text)
+        except SendBlocked:
+            self._update_context()
+            self.toast.show_message("这一支停在你的提问上；用这一层的 ＋ 生成回答", "error", 2400)
+            return
+        except LayerLocked:
+            self._pending_parent_id = None
+            self._update_context()
+            self.toast.show_message("这一层已锁；没有写入", "error", 2200)
+            return
+        except (KeyError, ValueError):
+            self._pending_parent_id = None
+            self._update_context()
+            return
         messages = chain_messages(self.convo, user.id)
+        if not messages:
+            return
+        self._pending_parent_id = None
         self.convo.ui["draft"] = ""
         self.composer.clear()
-        if not messages:
-            return
-        assistant = self.convo.add_assistant(user.id, model=model, move=True)
         self._refresh_stack()
         self._begin_job(assistant.id, user.id, messages, model)
-        self.transcript.rebuild(keep_bottom=True)
-        self.transcript.scroll_to_bottom()
-        self._refresh_meta()
-        self.atlas.refresh()
-        self._save_now()
-        QTimer.singleShot(0, self.transcript.scroll_to_bottom)
-
-    def _begin_assistant(self, user_parent_id: str, *, model: str) -> None:
-        if self._job:
-            return
-        if not self._ensure_key():
-            return
-        parent = self.convo.nodes.get(user_parent_id)
-        if parent is None or parent.role != "user":
-            return
-        messages = chain_messages(self.convo, user_parent_id)
-        if not messages:
-            return
-        assistant = self.convo.add_assistant(user_parent_id, model=model, move=True)
-        self._refresh_stack()
-        self._begin_job(assistant.id, user_parent_id, messages, model)
         self.transcript.rebuild(keep_bottom=True)
         self.transcript.scroll_to_bottom()
         self._refresh_meta()
@@ -709,7 +787,7 @@ class MainWindow(QMainWindow):
             if node is not None:
                 self.convo.finish_node(node_id, "complete", finish_reason=result.finish_reason)
                 self.transcript.refresh_node(node_id)
-                self._refresh_parent_fork(node_id)
+                self._refresh_parent_layer(node_id)
         elif result.status == "cancelled":
             self._settle_cancelled(node_id, notify=False)
         else:
@@ -717,21 +795,20 @@ class MainWindow(QMainWindow):
             if node is not None and node.text.strip():
                 self.convo.finish_node(node_id, "error", error_kind=err.kind, finish_reason=result.finish_reason)
                 self.transcript.refresh_node(node_id)
-                self._refresh_parent_fork(node_id)
+                self._refresh_parent_layer(node_id)
                 self.toast.show_message(f"{error_title(err.kind)} · 已保留收到内容", "error", 2200)
             else:
-                if node is not None:
-                    self.convo.delete_subtree(node_id)
+                self._drop_empty_node(node_id)
                 self.transcript.rebuild(keep_bottom=True)
                 self._refresh_stack()
                 if parent_id:
-                    self.transcript.refresh_fork(parent_id, text_only=True)
+                    self.transcript.refresh_layer(parent_id, text_only=True)
                 self._show_stream_notice(err, parent_id)
 
         self._set_idle()
         self._refresh_meta()
         self.atlas.refresh()
-        if node_id in {n.id for n in self.convo.chain()}:
+        if node_id in {n.id for n in self.convo.view()}:
             self.transcript.scroll_to_bottom()
         elif result.status == "complete":
             self.toast.show_message("另一分支已生成完成", "ok", 1800)
@@ -747,25 +824,32 @@ class MainWindow(QMainWindow):
             self.convo.finish_node(node_id, "interrupted")
             self.transcript.refresh_node(node_id)
             if parent_id:
-                self.transcript.refresh_fork(parent_id, text_only=True)
+                self.transcript.refresh_layer(parent_id, text_only=True)
             if notify:
                 self.toast.show_message(f"已停止 · 保留 {fmt_count(len(node.text))} 字", "ok", 1800)
             return True
-        self.convo.delete_subtree(node_id)
+        self._drop_empty_node(node_id)
         self.transcript.rebuild(keep_bottom=True)
         if parent_id:
-            self.transcript.refresh_fork(parent_id, text_only=True)
+            self.transcript.refresh_layer(parent_id, text_only=True)
         if notify:
             self.toast.show_message("已停止，回答还没有开始", "ok", 1600)
         return False
 
-    def _refresh_parent_fork(self, node_id: str) -> None:
+    def _drop_empty_node(self, node_id: str) -> None:
+        """Remove a placeholder that never received content (not a layer close)."""
+        self.convo.abandon(node_id)
+
+    def _refresh_parent_layer(self, node_id: str) -> None:
         node = self.convo.nodes.get(node_id)
         if node is not None and node.parent_id:
-            self.transcript.refresh_fork(node.parent_id, text_only=True)
+            self.transcript.refresh_layer(node.parent_id, text_only=True)
 
     def _stop_generation(self, *, silent: bool = False, notify: bool = True) -> None:
         if not self._job:
+            if self._pending_parent_id:
+                self._pending_parent_id = None
+                self._update_context()
             return
         job = self._job
         node_id = self._active_node_id
@@ -837,86 +921,66 @@ class MainWindow(QMainWindow):
 
     def _retry_parent(self, parent_id: str) -> None:
         self.notice.hide()
-        self._begin_assistant(parent_id, model=self.convo.model)
+        self._begin_answer(parent_id)
 
     def _fix_key_and_retry(self, parent_id: str) -> None:
         self._show_info()
         if self.client.api_key and parent_id in self.convo:
             self.notice.hide()
-            self._begin_assistant(parent_id, model=self.convo.model)
+            self._begin_answer(parent_id)
         elif not self.client.api_key:
             self._missing_key_notice()
 
-    # -- navigation ----------------------------------------------------
-    def _cycle_sibling(self, step: int) -> None:
-        chain = self.convo.chain()
-        if not chain:
-            return
-        pointer = chain[-1]
-        anchor_key = None
-        target = None
-        if self.convo.children(pointer.id):
-            kids = self.convo.children(pointer.id)
-            ids = [k.id for k in kids]
-            pref = pointer.preferred_child if pointer.preferred_child in ids else ids[0]
-            idx = ids.index(pref)
-            target = ids[(idx + step) % len(ids)]
-            anchor_key = "f:" + pointer.id
-        else:
-            for i in range(len(chain) - 1, 0, -1):
-                parent = chain[i - 1]
-                kids = self.convo.children(parent.id)
-                if len(kids) > 1:
-                    ids = [k.id for k in kids]
-                    active = chain[i].id
-                    if active not in ids:
-                        active = ids[0]
-                    idx = ids.index(active)
-                    target = ids[(idx + step) % len(ids)]
-                    anchor_key = "f:" + parent.id
-                    break
-        if target is None or anchor_key is None:
-            return
-        state = self.transcript.capture_key(anchor_key)
-        self.convo.set_pointer(self.convo.canonical_leaf(target))
-        self.transcript.rebuild(restore=state)
-        self._refresh_meta()
-        self.atlas.refresh()
-        self._schedule_save(120)
-
-    def _go_parent(self) -> None:
-        pointer = self.convo.pointer()
-        if pointer is None or pointer.parent_id is None:
-            return
-        self.convo.set_pointer(pointer.parent_id)
-        self.transcript.rebuild(keep_bottom=False)
-        self.transcript.scroll_to_node(pointer.parent_id)
-        self._refresh_meta()
-        self.atlas.refresh()
-        self._schedule_save(120)
-
-    def _go_preferred(self) -> None:
-        pointer = self.convo.pointer()
-        if pointer is None or not pointer.preferred_child:
-            return
-        target = self.convo.canonical_leaf(pointer.preferred_child)
-        self.convo.set_pointer(target)
-        self.transcript.rebuild(keep_bottom=False)
-        self.transcript.scroll_to_node(target)
-        self._refresh_meta()
-        self.atlas.refresh()
-        self._schedule_save(120)
-
-    def _atlas_click(self, node_id: str) -> None:
+    # -- baseline (the only position) ---------------------------------
+    def _set_baseline(self, node_id: str) -> None:
         if node_id not in self.convo:
             return
-        self.convo.set_pointer(node_id)
+        if self.convo.baseline_id == node_id:
+            return
+        self._pending_parent_id = None
+        self.convo.set_baseline(node_id)
         self.transcript.rebuild(keep_bottom=False)
         self.transcript.scroll_to_node(node_id)
         self._refresh_meta()
         self.atlas.refresh()
+        self._update_context()
         self._schedule_save(120)
+        node = self.convo.nodes[node_id]
+        self.toast.show_message(f"基准 →「{one_line(node.text, 16)}」· 锁集已更新", "ok", 1800)
         self.composer.focus_input()
+
+    def _reset_baseline(self) -> None:
+        root = self.convo.root_id()
+        if root is None:
+            return
+        if self.convo.baseline_id == root:
+            self.toast.show_message("已经在默认路线上", "ok", 1400)
+            return
+        self._set_baseline(root)
+
+    def _converge(self) -> None:
+        root = self.convo.root_id()
+        if root is None or self.convo.baseline_id in (None, root):
+            self.toast.show_message("已经在默认路线上，没有捷径可写", "ok", 1600)
+            return
+        layers = len(self.convo.shortcut_chain()) - 1
+        dlg = ConfirmDialog(
+            self,
+            title="把捷径写进默认？",
+            detail=(
+                f"会把 {layers} 层的默认改成你现在看到的这几支；"
+                "锁不会因此解开，基准也不动。之后回到默认路线会走到同一处。"
+            ),
+            confirm="写进默认",
+            danger=False,
+        )
+        if dlg.exec() != QDialog.DialogCode.Accepted:
+            return
+        changed = self.convo.converge(confirm=True)
+        self._schedule_save(120)
+        self._refresh_meta()
+        self._update_context()
+        self.toast.show_message(f"已写入 {changed} 处默认 · 回到默认路线后会到同一处", "ok", 2400)
 
     # -- shutdown ------------------------------------------------------
     def closeEvent(self, event) -> None:

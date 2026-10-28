@@ -16,8 +16,8 @@ DATA = Path("D:/LMY/coding/aichat/a/build/bench_data")
 import shutil; shutil.rmtree(DATA, ignore_errors=True)
 store = Store(DATA)
 c = Conversation(title="perf")
-u = c.add_user("性能测试：一条足够长的消息")
-a = c.add_assistant(u.id, status="complete")
+u = c.create(None, "user", "性能测试：一条足够长的消息")
+a = c.create(c.layer(u.id), "assistant", status="complete")
 a.text = ("分叉不是把树画出来，而是让路径保持可读。" * 60) + "\n\n" + ("这是一段额外的正文，用于模拟较长的流式消息。" * 40)
 store.save(c)
 w = MainWindow(store, store.read_settings(), c); w.resize(1420, 950); w.show()
@@ -66,20 +66,18 @@ for i in range(70):
     chunks.append((time.perf_counter()-t0)*1000)
 a.status = "complete"; w.transcript.refresh_node(a.id); pump(80)
 
-# --- branch switch: build a fork and switch, measuring reflow
-c.set_pointer(a.id)
-u2 = c.add_user("左支：从信息架构看")
-a2 = c.add_assistant(u2.id, status="complete"); a2.text = "左支的回答。" * 8
-c.set_pointer(a.id)
-b1 = c.add_user("右支：从成本看")
-b2 = c.add_assistant(b1.id, status="complete"); b2.text = "右支的回答。" * 8
-c.set_pointer(a2.id)
+# --- branch switch: build a layer under the first answer and switch it
+u2 = c.create(c.layer(a.id), "user", "左支：从信息架构看")
+a2 = c.create(c.layer(u2.id), "assistant", "左支的回答。" * 8, status="complete")
+b1 = c.create(c.layer(a.id), "user", "右支：从成本看")
+b2 = c.create(c.layer(b1.id), "assistant", "右支的回答。" * 8, status="complete")
+c.activate(a.id, u2.id)
 w.transcript.rebuild(); w._refresh_meta(); pump(120)
 switches = []
 for i in range(20):
     target = b1.id if i % 2 == 0 else u2.id
     t0 = time.perf_counter()
-    w._switch_branch(a.id, target)
+    w._activate(a.id, target)
     app.processEvents()
     switches.append((time.perf_counter()-t0)*1000)
 
@@ -93,7 +91,7 @@ Path("D:/LMY/coding/aichat/a/docs/BENCH.md").write_text(
     "- machine: " + platform.platform() + " / Python " + platform.python_version() + "\n" +
     "- typing (key -> composer paint): p50 %.2f ms, p95 %.2f ms, max %.2f ms\n" % (pct(typing,.5), pct(typing,.95), max(typing)) +
     "- streaming token batch (5 chars -> incremental draft append + body paint): p50 %.2f ms, p95 %.2f ms, max %.2f ms\n" % (pct(chunks,.5), pct(chunks,.95), max(chunks)) +
-    "- branch switch (prefix diff + rebuild suffix): p50 %.2f ms, p95 %.2f ms, max %.2f ms\n" % (pct(switches,.5), pct(switches,.95), max(switches)) +
-    "\nMethod: one warm-up key sequence and one warm-up streaming append precede the measurements; 160 injected key events with an immediate repaint of the composer; 70 streaming batches of 5 Chinese characters appended to an in-flight card with an immediate repaint; 20 alternating branch switches. Real deltas are batched by the app on a 16 ms timer, so end-to-end token latency is bounded by one timer tick plus the render number below.\n"
+    "- layer switch (prefix diff + rebuild suffix): p50 %.2f ms, p95 %.2f ms, max %.2f ms\n" % (pct(switches,.5), pct(switches,.95), max(switches)) +
+    "\nMethod: one warm-up key sequence and one warm-up streaming append precede the measurements; 160 injected key events with an immediate repaint of the composer; 70 streaming batches of 5 Chinese characters appended to an in-flight card with an immediate repaint; 20 alternating layer switches. Real deltas are batched by the app on a 14 ms timer, so the end-to-end p95 is about 14 ms plus the render number above. Layer switches alternate between two already-rendered layers, so the card cache is exercised; the first visit to an unseen layer additionally renders its cards.\n"
 )
 w._save_now(); w.close()
