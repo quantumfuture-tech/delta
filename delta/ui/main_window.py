@@ -592,14 +592,14 @@ class MainWindow(QMainWindow):
             f"QMenu::item:selected {{ background:{C.raised}; color:{C.ink}; }}"
             f"QMenu::separator {{ height:1px; background:{C.line}; margin:4px 6px; }}"
         )
-        menu.addAction("复制", lambda: self._copy_node(node_id))
+        menu.addAction("复制", lambda *_: self._copy_node(node_id))
         parent_id = node.parent_id
         if parent_id is not None:
             menu.addSeparator()
-            menu.addAction("在这一层新建…", lambda: self._new_at_layer(parent_id))
-            menu.addAction("关闭这一支…", lambda: self._close_tab(parent_id, node_id))
+            menu.addAction("在这一层新建…", lambda *_: self._new_at_layer(parent_id))
+            menu.addAction("关闭这一支…", lambda *_: self._close_tab(parent_id, node_id))
             if self.convo.is_locked(parent_id):
-                menu.addAction("这一层已锁 · 抬基准…", lambda: self._ask_unlock(parent_id))
+                menu.addAction("这一层已锁 · 抬基准…", lambda *_: self._ask_unlock(parent_id))
         menu.exec(global_pos)
 
     def _copy_node(self, node_id: str) -> None:

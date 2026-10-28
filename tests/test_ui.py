@@ -243,6 +243,20 @@ def test_confirm_raises_the_baseline_and_releases_the_layer(qapp, window):
     assert [n.id for n in c.view()] == [u0.id, a2.id]
 
 
+def test_unlock_confirmation_works_with_tab_and_enter(qapp, window):
+    c, u0, a1, u1, b1, b2, a2 = seed(window, qapp, extra_answer=True)
+    window._set_baseline(b2.id)
+    pump(qapp, 40)
+    bar = window.transcript._layers[u0.id]
+    bar._show_confirm()
+    assert bar._confirm_ok.focusPolicy() == Qt.FocusPolicy.StrongFocus
+    bar._confirm_ok.setFocus()
+    QTest.keyClick(bar._confirm_ok, Qt.Key.Key_Return)
+    pump(qapp, 80)
+    assert c.baseline_id == u0.id
+    assert c.locked_parent_ids() == set()
+
+
 def test_close_active_activates_the_next_display_neighbour(qapp, window, monkeypatch):
     c, u0, a1, u1, b1, b2, a2 = seed(window, qapp)
     assert c.nodes[u1.id].default_child == b1.id

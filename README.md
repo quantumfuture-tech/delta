@@ -75,7 +75,7 @@ python -m delta
 python -m pytest -q
 ```
 
-90 个测试：层与基准的派生（视图纯函数、锁集、默认/展示序/出生序）、四个改层门禁、关闭相邻接替、固化、核心防御性删除、schema 1 迁移、原子存储、SSE 错误分类/中断保留、UI 的前缀控件身份与缓存复用、单行标签条溢出滚动、锁定层两步确认、ATLAS 只改基准、右键入口、无 UI 旁路静态扫描、重启一致性、快速乱点。结果见 [docs/TEST_RESULTS.md](docs/TEST_RESULTS.md)。
+91 个测试：层与基准的派生（视图纯函数、锁集、默认/展示序/出生序）、四个改层门禁、关闭相邻接替、固化、核心防御性删除、schema 1 迁移、原子存储、SSE 错误分类/中断保留、UI 的前缀控件身份与缓存复用、单行标签条溢出滚动、锁定层两步确认、ATLAS 只改基准、右键入口、无 UI 旁路静态扫描、重启一致性、快速乱点。结果见 [docs/TEST_RESULTS.md](docs/TEST_RESULTS.md)。
 
 性能见 [docs/BENCH.md](docs/BENCH.md)。
 
