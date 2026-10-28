@@ -203,6 +203,7 @@ class TabChip(QWidget):
         if self.open:
             p.setPen(QPen(color(C.brass), 2))
             p.drawLine(8, int(self.height()) - 2, self.width() - 8, int(self.height()) - 2)
+            p.drawLine(7, 8, 7, int(self.height()) - 8)
         p.end()
 
     def set_open(self, open: bool) -> None:

@@ -297,11 +297,15 @@ class MainWindow(QMainWindow):
         locked = bool(parent and self.convo.is_locked(parent))
         view_ids = {n.id for n in self.convo.view()}
         offscreen = bool(parent and parent not in view_ids)
-        layer_text = f"写：{slots.layer_label(self.convo, key)}"
-        if locked:
-            layer_text += " · 写层已锁 · 执行时先抬基准"
-        if offscreen:
-            layer_text += " · 不在当前视图"
+        layer_label = slots.layer_label(self.convo, key)
+        if offscreen and locked:
+            layer_text = f"写（不在视图 · 已锁 · 执行时先抬基准）：{layer_label}"
+        elif offscreen:
+            layer_text = f"写（不在当前视图）：{layer_label}"
+        elif locked:
+            layer_text = f"写（已锁 · 执行时先抬基准）：{layer_label}"
+        else:
+            layer_text = f"写：{layer_label}"
         target_number = slots.target_number(self.convo, key)
         target_title = slots.target_title(self.convo, key)
         target_mode = slots.MODE_LABEL[draft.mode]
