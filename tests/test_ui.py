@@ -4,9 +4,10 @@ from pathlib import Path
 
 import pytest
 
-from PySide6.QtCore import QPoint, Qt
+from PySide6.QtCore import QEvent, QPoint, QPointF, Qt
+from PySide6.QtGui import QMouseEvent
 from PySide6.QtTest import QTest
-from PySide6.QtWidgets import QDialog
+from PySide6.QtWidgets import QApplication, QDialog
 
 from delta.core import commands, slots
 from delta.core.client import StreamError, StreamResult
@@ -555,7 +556,10 @@ def test_tabs_stay_on_one_row_and_scroll(qapp, window):
     bar = window.transcript._layers[u0.id]
     assert bar is not None
     assert len(bar._chips) == 8
-    assert bar.height() == 72
+    # the row is title (20) + gap (5) + tab row (33) + padding; assert the shape, not the number
+    assert bar._title.isVisible()
+    assert bar._scroll.height() == 33
+    assert bar.height() == bar._scroll.mapTo(bar, QPoint(0, 0)).y() + 33
     ys = {chip.mapTo(bar, QPoint(0, 0)).y() for chip in bar._chips}
     assert len(ys) == 1
     assert bar._scroll.horizontalScrollBar().maximum() > 0
@@ -640,8 +644,8 @@ def test_single_child_layer_has_a_visible_tab_with_plus_and_close(qapp, window):
     bar = window.transcript._layers[a1.id]
     assert bar is not None
     # every layer keeps the same row: a title line and a 33px tab row
-    assert bar.height() == 72
     assert bar._title.isVisible() and bar._title.text() == "分支 · 1"
+    assert bar.height() == bar._scroll.mapTo(bar, QPoint(0, 0)).y() + 33
     assert len(bar._chips) == 1
     assert bar._add.isVisible()
     chip = bar._chips[0]
@@ -680,13 +684,57 @@ def test_add_chip_opens_a_slot_without_creating(qapp, window):
 def test_drag_reorders_the_layer_without_moving_the_view(qapp, window):
     c, u0, a1, u1, b1, b2, a2 = seed(window, qapp)
     bar = window.transcript._layers[u1.id]
+    chip = next(ch for ch in bar._chips if ch.child.id == b2.id)
     target = next(ch for ch in bar._chips if ch.child.id == b1.id)
-    pos = target.mapToGlobal(QPoint(2, target.height() // 2))
-    bar._on_drag(b2.id, pos)
+    vp = bar._scroll.viewport()
+
+    bar._begin_drag(b2.id, chip.mapToGlobal(QPoint(40, chip.height() // 2)))
+    assert bar._drag is not None
+    assert chip.isHidden()                      # the lifted tab is a pixmap now
+    gx = target.mapTo(vp, QPoint(2, target.height() // 2)).x()
+    gp = vp.mapToGlobal(QPoint(gx, target.height() // 2))
+    move = QMouseEvent(
+        QEvent.Type.MouseMove, QPointF(bar.mapFromGlobal(gp)), QPointF(gp),
+        Qt.MouseButton.NoButton, Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier,
+    )
+    QApplication.sendEvent(bar, move)
+    pump(qapp, 30)
+    assert bar._drag["index"] == 0
+    release = QMouseEvent(
+        QEvent.Type.MouseButtonRelease, QPointF(bar.mapFromGlobal(gp)), QPointF(gp),
+        Qt.MouseButton.LeftButton, Qt.MouseButton.NoButton, Qt.KeyboardModifier.NoModifier,
+    )
+    QApplication.sendEvent(bar, release)
     pump(qapp, 60)
+    assert bar._drag is None
     assert c.display_ids(u1.id) == [b2.id, b1.id]
     assert c.nodes[u1.id].default_child == b1.id
     assert c.view()[-1].id == b1.id
+
+
+def test_drag_escape_puts_the_tab_back(qapp, window):
+    c, u0, a1, u1, b1, b2, a2 = seed(window, qapp)
+    bar = window.transcript._layers[u1.id]
+    before = c.display_ids(u1.id)
+    chip = next(ch for ch in bar._chips if ch.child.id == b2.id)
+    vp = bar._scroll.viewport()
+    bar._begin_drag(b2.id, chip.mapToGlobal(QPoint(40, chip.height() // 2)))
+    target = next(ch for ch in bar._chips if ch.child.id == b1.id)
+    gx = target.mapTo(vp, QPoint(2, target.height() // 2)).x()
+    gp = vp.mapToGlobal(QPoint(gx, target.height() // 2))
+    QApplication.sendEvent(
+        bar,
+        QMouseEvent(
+            QEvent.Type.MouseMove, QPointF(bar.mapFromGlobal(gp)), QPointF(gp),
+            Qt.MouseButton.NoButton, Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier,
+        ),
+    )
+    assert bar._drag["index"] == 0
+    bar._on_escape()
+    pump(qapp, 40)
+    assert bar._drag is None
+    assert c.display_ids(u1.id) == before
+    assert bar._chips[0].isVisible()
 
 
 def test_close_chip_removes_the_branch(qapp, window, monkeypatch):

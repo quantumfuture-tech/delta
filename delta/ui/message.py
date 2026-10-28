@@ -63,6 +63,8 @@ class MessagePanel(QWidget):
         super().__init__(parent)
         self.role = role
         self._hover = False
+        self._pinned = False
+        self._mouth: tuple[float, float] | None = None
         self.setAttribute(Qt.WidgetAttribute.WA_Hover, True)
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Minimum)
 
@@ -71,23 +73,65 @@ class MessagePanel(QWidget):
             self._hover = hover
             self.update()
 
+    def set_mouth(self, mouth: tuple[float, float] | None) -> None:
+        """Opening in the top edge where the layer's tab sits on this surface."""
+        if self._mouth != mouth:
+            self._mouth = mouth
+            self.update()
+
+    def set_pinned(self, pinned: bool) -> None:
+        """This node sits on the shortcut chain: keep the accent, drop it to dark gold."""
+        if self._pinned != pinned:
+            self._pinned = pinned
+            self.update()
+
+    def _outline(self, rect: QRectF, radius: float) -> tuple[QPainterPath, QPainterPath]:
+        if not self._mouth:
+            path = QPainterPath()
+            path.addRoundedRect(rect, radius, radius)
+            return path, path
+        m0, m1 = self._mouth
+        left, top, right, bottom = rect.left(), rect.top(), rect.right(), rect.bottom()
+        m0 = max(left, min(m0, right))
+        m1 = max(left + radius, min(m1, right))
+        path = QPainterPath()
+        path.moveTo(m1, top)
+        path.lineTo(right - radius, top)
+        path.quadTo(right, top, right, top + radius)
+        path.lineTo(right, bottom - radius)
+        path.quadTo(right, bottom, right - radius, bottom)
+        path.lineTo(left + radius, bottom)
+        path.quadTo(left, bottom, left, bottom - radius)
+        if m0 <= left + 0.5:
+            path.lineTo(left, top)
+        else:
+            path.lineTo(left, top + radius)
+            path.quadTo(left, top, left + radius, top)
+            path.lineTo(m0, top)
+        fill = QPainterPath(path)
+        fill.closeSubpath()
+        return fill, path
+
     def paintEvent(self, event) -> None:
         p = QPainter(self)
         p.setRenderHint(QPainter.RenderHint.Antialiasing, True)
         rect = QRectF(self.rect()).adjusted(0.5, 0.5, -0.5, -0.5)
         if self.role == "user":
-            p.setPen(QPen(color(C.user_line), 1))
+            fill, edge = self._outline(rect, 13)
+            p.setPen(Qt.PenStyle.NoPen)
             p.setBrush(color(C.user_bg))
-            p.drawRoundedRect(rect, 13, 13)
-            clip = QPainterPath()
-            clip.addRoundedRect(rect, 13, 13)
-            p.setClipPath(clip)
-            p.setPen(QPen(color(C.brass_deep, 220), 2))
+            p.drawPath(fill)
+            p.setPen(QPen(color(C.user_line), 1))
+            p.setBrush(Qt.BrushStyle.NoBrush)
+            p.drawPath(edge)
+            p.setClipPath(fill)
+            p.setPen(QPen(color(C.brass, 90) if self._pinned else color(C.brass_deep, 220), 2))
             p.drawLine(1, 18, 1, self.height() - 18)
         elif self._hover:
+            fill, _edge = self._outline(rect, 11)
             p.setPen(Qt.PenStyle.NoPen)
-            p.setBrush(color("#0E1116", 220))
-            p.drawRoundedRect(rect, 11, 11)
+            p.setBrush(color("#11161D", 220))
+            p.drawPath(fill)
         p.end()
 
 
@@ -207,6 +251,7 @@ class MessageCard(QWidget):
         self.node = node
         self.node_id = node.id
         self._current = current
+        self._pinned = False
         self._hover = False
         self._phase = 0.0
         self._reasoning_open = False
@@ -233,7 +278,7 @@ class MessageCard(QWidget):
 
         holder = QWidget(self)
         holder_lay = QVBoxLayout(holder)
-        holder_lay.setContentsMargins(0, 8, 10, 8)
+        holder_lay.setContentsMargins(0, 0, 10, 8)
         holder_lay.setSpacing(0)
         root.addWidget(holder, 1)
 
@@ -311,9 +356,10 @@ class MessageCard(QWidget):
         is_user = n.role == "user"
         model = (n.model or "deepseek-chat").replace("deepseek-", "DEEPSEEK ").upper()
         self.role_label.setText("YOU" if is_user else model)
-        self.role_label.setStyleSheet(
-            f"color:{C.brass if is_user else C.ink_dim}; background:transparent;"
-        )
+        role_ink = (
+            C.brass_dim if self._pinned else C.brass
+        ) if is_user else (C.muted if self._pinned else C.ink_dim)
+        self.role_label.setStyleSheet(f"color:{role_ink}; background:transparent;")
         self.meta_label.setText(clock(n.created_at))
         self.meta_label.setStyleSheet(f"color:{C.faint}; background:transparent;")
 
@@ -455,6 +501,18 @@ class MessageCard(QWidget):
 
     def _focus_composer(self) -> None:
         self.window().composer.focus_input()  # type: ignore[attr-defined]
+
+    def set_mouth(self, mouth: tuple[float, float] | None) -> None:
+        """The layer's tab sits on this card; its opening is cut from the top edge."""
+        self.panel.set_mouth(mouth)
+
+    def set_pinned(self, pinned: bool) -> None:
+        """On the shortcut chain: the card's accents drop to dark gold."""
+        if self._pinned == pinned:
+            return
+        self._pinned = pinned
+        self.panel.set_pinned(pinned)
+        self.refresh()
 
     def set_current(self, current: bool) -> None:
         if self._current == current:

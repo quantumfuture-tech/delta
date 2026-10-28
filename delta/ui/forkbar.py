@@ -7,7 +7,17 @@ model: it only opens the inline "raise the baseline" confirmation.
 """
 from __future__ import annotations
 
-from PySide6.QtCore import QPoint, QRectF, QSize, Qt, Signal
+from PySide6.QtCore import (
+    QEasingCurve,
+    QPoint,
+    QPointF,
+    QRectF,
+    QSize,
+    Qt,
+    QTimer,
+    QVariantAnimation,
+    Signal,
+)
 from PySide6.QtGui import QFontMetrics, QKeySequence, QPainter, QPainterPath, QPen, QShortcut
 from PySide6.QtWidgets import (
     QHBoxLayout,
@@ -26,6 +36,22 @@ from .theme import C, FONT_MONO, FONT_UI, color, font
 from .widgets import PillButton, fmt_count
 
 
+MOUTH = True          # prototype switch: open-bottom tab + floor
+MOUTH_FLOOR = True    # prototype switch: draw the floor line
+
+
+def _open_tab_path(x: float, y: float, w: float, h: float) -> QPainterPath:
+    """Top edge and both sides of a tab whose bottom is open into the page."""
+    path = QPainterPath()
+    path.moveTo(x, y + h - 5)
+    path.lineTo(x, y + 8)
+    path.quadTo(x, y, x + 8, y)
+    path.lineTo(x + w - 8, y)
+    path.quadTo(x + w, y, x + w, y + 8)
+    path.lineTo(x + w, y + h - 5)
+    return path
+
+
 def _preview(text: str) -> str:
     flat = one_line(text, 90)
     for token in ("**", "__", "```", "`", "> ", "#", "*"):
@@ -36,7 +62,7 @@ def _preview(text: str) -> str:
 class TabChip(QWidget):
     activated = Signal(str)
     closed = Signal(str)
-    drag_released = Signal(str, QPoint)
+    drag_started = Signal(str, QPoint)
     slot_menu_requested = Signal(str, QPoint)
     slot_requested = Signal(str)
 
@@ -49,6 +75,7 @@ class TabChip(QWidget):
         open: bool,
         descendants: int,
         locked: bool,
+        preferred: bool = False,
         parent=None,
     ) -> None:
         super().__init__(parent)
@@ -58,9 +85,11 @@ class TabChip(QWidget):
         self.open = open
         self.descendants = descendants
         self.locked = locked
+        self.preferred = preferred
         self._hover = False
         self._press = False
         self._moved = False
+        self._lifted = False
         self._down = QPoint()
         self._text = ""
         self._width = 0
@@ -120,14 +149,17 @@ class TabChip(QWidget):
             return
         self._press = True
         self._moved = False
+        self._lifted = False
         self._down = event.globalPosition().toPoint()
         event.accept()
 
     def mouseMoveEvent(self, event) -> None:
         if self._press and not self._moved:
-            if (event.globalPosition().toPoint() - self._down).manhattanLength() > 14:
+            if (event.globalPosition().toPoint() - self._down).manhattanLength() > 6:
                 self._moved = True
                 self.setCursor(Qt.CursorShape.ClosedHandCursor)
+                self.drag_started.emit(self.child.id, event.globalPosition().toPoint())
+                return
         self.update()
 
     def mouseReleaseEvent(self, event) -> None:
@@ -137,7 +169,6 @@ class TabChip(QWidget):
         self.setCursor(Qt.CursorShape.PointingHandCursor)
         if self._moved:
             self._moved = False
-            self.drag_released.emit(self.child.id, event.globalPosition().toPoint())
             return
         if not self.rect().contains(event.position().toPoint()):
             return
@@ -153,29 +184,52 @@ class TabChip(QWidget):
         p = QPainter(self)
         p.setRenderHint(QPainter.RenderHint.Antialiasing, True)
         r = QRectF(self.rect()).adjusted(0.5, 0.5, -0.5, -0.5)
-        if self.active:
-            bg = color("#1C1811")
-            border = color(C.brass, 210)
-        elif self._hover:
-            bg = color(C.raised)
-            border = color(C.line_hi)
-        else:
-            bg = color(C.panel_hi)
-            border = color(C.line)
-        p.setPen(QPen(border, 1))
-        p.setBrush(bg)
-        p.drawRoundedRect(r, 8, 8)
-        if self.active:
-            p.setPen(QPen(color(C.brass, 90), 1))
+        edge = color(C.ink_dim, 220) if self.locked else color(C.brass, 210)
+        if self._lifted:
+            p.setPen(QPen(color(C.brass, 230), 1))
+            p.setBrush(color(C.raised))
+            p.drawRoundedRect(r, 8, 8)
+        mouth = self.active and MOUTH and not self._lifted
+        if mouth:
+            surface = C.user_bg if self.child.role == "user" else C.bg
+            p.setPen(Qt.PenStyle.NoPen)
+            p.setBrush(color(surface))
+            p.drawRect(r)
+            p.setPen(QPen(edge, 1))
             p.setBrush(Qt.BrushStyle.NoBrush)
-            p.drawRoundedRect(r.adjusted(1, 1, -1, -1), 7, 7)
+            p.drawPath(_open_tab_path(r.left(), r.top(), r.width(), r.height()))
+        else:
+            if self.active:
+                bg = color("#1C1811")
+                border = edge
+            elif self._hover:
+                bg = color(C.raised)
+                border = color(C.line_hi)
+            else:
+                bg = color(C.panel_hi)
+                border = color(C.line)
+            p.setPen(QPen(border, 1))
+            p.setBrush(bg)
+            p.drawRoundedRect(r, 8, 8)
+            if self.active:
+                p.setPen(QPen(color(C.brass, 90), 1))
+                p.setBrush(Qt.BrushStyle.NoBrush)
+                p.drawRoundedRect(r.adjusted(1, 1, -1, -1), 7, 7)
 
+        if self.open:
+            p.setPen(Qt.PenStyle.NoPen)
+            p.setBrush(color(C.brass, 235))
+            p.drawRoundedRect(QRectF(6.5, self.height() / 2 - 7.5, 27, 15), 4, 4)
+        if self.preferred:
+            p.setPen(Qt.PenStyle.NoPen)
+            p.setBrush(color(C.brass_dim, 245))
+            p.drawRoundedRect(QRectF(10, 0.2, self.width() - 20, 2.4), 1.2, 1.2)
         p.setFont(font(FONT_MONO, 8.0, 500, 0.5))
-        p.setPen(color(C.brass if (self.active or self.open) else C.faint))
+        p.setPen(color(C.bg if self.open else C.muted if self.locked else C.brass if self.active else C.faint))
         p.drawText(QRectF(10, 0, 20, self.height()), Qt.AlignmentFlag.AlignVCenter, f"{self.index:02d}")
 
         p.setFont(font(FONT_UI, 9.3))
-        p.setPen(color(C.ink if self.active else C.ink_dim))
+        p.setPen(color(C.ink_dim if self.active and self.locked else C.ink if self.active else C.ink_dim))
         avail = self.width() - 10 - 20 - 8 - (22 if self.descendants else 0) - 52
         text = self._fm.elidedText(self._text, Qt.TextElideMode.ElideRight, max(20, avail))
         p.drawText(QRectF(38, 0, avail, self.height()), Qt.AlignmentFlag.AlignVCenter, text)
@@ -190,9 +244,15 @@ class TabChip(QWidget):
             )
         # explicit slot opener (left) and close (right), both on the tab
         cy = self.height() / 2
-        col = C.ink_dim if self._hover else C.faint
-        p.setPen(QPen(color(col), 1.25))
         px = self.width() - 34
+        if self.open:
+            # the slot itself: a small brass trough with the + sitting in it
+            p.setPen(QPen(color(C.brass), 1.4))
+            p.setBrush(color(C.brass, 36))
+            p.drawRoundedRect(QRectF(px - 6.5, cy - 5.0, 13.0, 10.0), 3, 3)
+            p.setPen(QPen(color(C.brass, 240), 1.6))
+        else:
+            p.setPen(QPen(color(C.ink_dim if self._hover else C.faint), 1.25))
         p.drawLine(int(px - 3), int(cy), int(px + 3), int(cy))
         p.drawLine(int(px), int(cy - 3), int(px), int(cy + 3))
         col = C.ink_dim if (self._hover and not self.locked) else C.line_hi if self._hover else C.faint
@@ -200,16 +260,16 @@ class TabChip(QWidget):
         cx = self.width() - 16
         p.drawLine(int(cx - 3.2), int(cy - 3.2), int(cx + 3.2), int(cy + 3.2))
         p.drawLine(int(cx - 3.2), int(cy + 3.2), int(cx + 3.2), int(cy - 3.2))
-        if self.open:
-            p.setPen(QPen(color(C.brass), 2))
-            p.drawLine(8, int(self.height()) - 2, self.width() - 8, int(self.height()) - 2)
-            p.drawLine(7, 8, 7, int(self.height()) - 8)
         p.end()
 
     def set_open(self, open: bool) -> None:
         if self.open == open:
             return
         self.open = open
+        self.update()
+
+    def set_lifted(self, lifted: bool) -> None:
+        self._lifted = lifted
         self.update()
 
 
@@ -331,12 +391,17 @@ class LayerBar(QWidget):
         self._open_base = open_base
         self._open_tail = open_tail
         self._chips: list[TabChip] = []
+        self._drag: dict | None = None
+        self._drag_anim: QVariantAnimation | None = None
+        self._drag_scroll = QTimer(self)
+        self._drag_scroll.setInterval(16)
+        self._drag_scroll.timeout.connect(self._drag_autoscroll)
         self._setup()
         self.refresh(active_child)
 
     # -- construction --------------------------------------------------
     def _setup(self) -> None:
-        self.setFixedHeight(72)
+        self.setFixedHeight(61)
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         root = QHBoxLayout(self)
         root.setContentsMargins(0, 0, 0, 0)
@@ -348,7 +413,7 @@ class LayerBar(QWidget):
 
         holder = QWidget(self)
         self._holder_lay = QVBoxLayout(holder)
-        self._holder_lay.setContentsMargins(0, 3, 10, 11)
+        self._holder_lay.setContentsMargins(0, 3, 10, 0)
         self._holder_lay.setSpacing(5)
         root.addWidget(holder, 1)
 
@@ -386,6 +451,7 @@ class LayerBar(QWidget):
         self._row.setContentsMargins(0, 0, 0, 0)
         self._row.setSpacing(7)
         self._scroll.setWidget(self._host)
+        self._scroll.horizontalScrollBar().valueChanged.connect(self._on_strip_scrolled)
         self._add = AddChip(self._body)
         self._add.clicked.connect(self._on_add)
         body.addWidget(self._scroll, 1)
@@ -416,7 +482,7 @@ class LayerBar(QWidget):
 
         self._esc = QShortcut(QKeySequence("Esc"), self)
         self._esc.setContext(Qt.ShortcutContext.WidgetWithChildrenShortcut)
-        self._esc.activated.connect(self._hide_confirm)
+        self._esc.activated.connect(self._on_escape)
 
     # -- state ---------------------------------------------------------
     def _clear(self) -> None:
@@ -429,12 +495,15 @@ class LayerBar(QWidget):
         self._chips = []
 
     def refresh(self, active_child: str | None = None) -> None:
+        if self._drag is not None:
+            self._end_drag(commit=False)
         self.active_child = active_child
         self._hide_confirm()
         self._clear()
         layer = self.convo.layer(self.parent_id)
         birth = [n.id for n in layer.children]
         total = len(layer.tabs)
+        default = layer.active
         for child in layer.tabs:
             chip = TabChip(
                 child,
@@ -443,11 +512,12 @@ class LayerBar(QWidget):
                 open=(child.id == self._open_base),
                 descendants=self.convo.descendant_count(child.id),
                 locked=layer.is_locked,
+                preferred=(default is not None and default.id == child.id and child.id != active_child),
                 parent=self._host,
             )
             chip.activated.connect(self._on_activate)
             chip.closed.connect(self._on_close)
-            chip.drag_released.connect(self._on_drag)
+            chip.drag_started.connect(self._begin_drag)
             chip.slot_menu_requested.connect(self._tab_menu)
             chip.slot_requested.connect(self._on_chip_slot)
             self._row.addWidget(chip)
@@ -456,6 +526,9 @@ class LayerBar(QWidget):
         self._add.set_open(self._open_tail)
         self._host.setMinimumWidth(self._content_width())
         self._title.setText(self._title_text(layer, total))
+        self._title.setStyleSheet(
+            f"color:{C.muted if layer.is_locked else C.brass_dim}; background:transparent;"
+        )
         self._hint.setText(self._hint_text(layer, total))
         if active_child:
             for chip in self._chips:
@@ -547,28 +620,190 @@ class LayerBar(QWidget):
             )
         menu.exec(global_pos)
 
-    def _on_drag(self, child_id: str, global_pos: QPoint) -> None:
+    # -- dragging a tab -------------------------------------------------
+    def _begin_drag(self, child_id: str, global_pos: QPoint) -> None:
         if self.convo.is_locked(self.parent_id):
-            self._show_confirm()
             return
-        if not self.rect().contains(self.mapFromGlobal(global_pos)):
+        chip = next((c for c in self._chips if c.child.id == child_id), None)
+        if chip is None or len(self._chips) < 2:
+            return
+        order = list(self._chips)
+        start = order.index(chip)
+        frozen = []
+        while self._row.count():
+            item = self._row.takeAt(0)
+            if item.widget() is not None:
+                frozen.append(item.widget())
+        chip.set_lifted(True)
+        pix = chip.grab()
+        chip.set_lifted(False)
+        chip.hide()
+        self._drag = {
+            "id": child_id,
+            "chip": chip,
+            "pix": pix,
+            "grab_dx": global_pos.x() - chip.mapToGlobal(QPoint(0, 0)).x(),
+            "y": chip.mapTo(self, QPoint(0, 0)).y(),
+            "others": [c for c in order if c is not chip],
+            "order": order,
+            "start": start,
+            "index": start,
+            "frozen": frozen,
+            "px": chip.mapTo(self, QPoint(0, 0)).x(),
+            "vx": self._scroll.viewport().mapFromGlobal(global_pos).x(),
+        }
+        self._layout_row(animate=False)
+        self.setCursor(Qt.CursorShape.ClosedHandCursor)
+        self.grabMouse()
+        self._drag_scroll.start()
+        self.update()
+
+    def _target_index(self, host_x: float) -> int:
+        drag = self._drag
+        if drag is None:
+            return 0
+        index = 0
+        for chip in drag["others"]:
+            if host_x > chip.x() + chip.width() / 2:
+                index += 1
+            else:
+                break
+        return index
+
+    def _layout_row(self, *, animate: bool, duration: int = 150) -> None:
+        drag = self._drag
+        if drag is None:
+            return
+        gap = drag["chip"].width() + 7.0
+        index = drag["index"]
+        targets: dict[TabChip, float] = {}
+        x = 0.0
+        for i, chip in enumerate(drag["others"]):
+            if i == index:
+                x += gap
+            targets[chip] = x
+            x += chip.width() + 7.0
+        if not animate:
+            for chip, tx in targets.items():
+                chip.move(int(tx), chip.y())
+            return
+        if self._drag_anim is not None:
+            self._drag_anim.stop()
+        start = {chip: float(chip.x()) for chip in targets}
+        if all(abs(start[c] - targets[c]) < 0.5 for c in targets):
+            return
+        anim = QVariantAnimation(self)
+        anim.setStartValue(0.0)
+        anim.setEndValue(1.0)
+        anim.setDuration(duration)
+        anim.setEasingCurve(QEasingCurve.Type.OutCubic)
+
+        def step(value: float) -> None:
+            for chip, tx in targets.items():
+                chip.move(int(round(start[chip] + (tx - start[chip]) * value)), chip.y())
+
+        anim.valueChanged.connect(step)
+        anim.start()
+        self._drag_anim = anim
+
+    def _drag_autoscroll(self) -> None:
+        drag = self._drag
+        if drag is None:
+            self._drag_scroll.stop()
             return
         vp = self._scroll.viewport()
-        pos = vp.mapFromGlobal(global_pos)
-        ids = [chip.child.id for chip in self._chips]
-        if child_id not in ids:
+        bar = self._scroll.horizontalScrollBar()
+        if bar.maximum() <= bar.minimum():
             return
-        target = len(ids)
-        for i, chip in enumerate(self._chips):
-            centre = chip.mapTo(vp, chip.rect().center())
-            if pos.x() < centre.x():
-                target = i
-                break
-        old = ids.index(child_id)
-        if target > old:
-            target -= 1
-        if target != old:
-            self.reorder_requested.emit(self.parent_id, child_id, target)
+        if drag["vx"] < 24 and bar.value() > bar.minimum():
+            bar.setValue(bar.value() - 10)
+        elif drag["vx"] > vp.width() - 24 and bar.value() < bar.maximum():
+            bar.setValue(bar.value() + 10)
+
+    def _on_strip_scrolled(self, _value: int) -> None:
+        """Wheel or auto-scroll moves the row under the pointer: re-read the drop index."""
+        drag = self._drag
+        if drag is None:
+            return
+        index = self._target_index(drag["vx"] + self._scroll.horizontalScrollBar().value())
+        if index != drag["index"]:
+            drag["index"] = index
+            self._layout_row(animate=True)
+
+    def wheelEvent(self, event) -> None:
+        if self._drag is None:
+            super().wheelEvent(event)
+            return
+        pixel = event.pixelDelta()
+        angle = event.angleDelta()
+        delta = pixel.x() or pixel.y() or angle.x() or angle.y()
+        if delta:
+            bar = self._scroll.horizontalScrollBar()
+            bar.setValue(bar.value() - delta)
+        event.accept()
+
+    def mouseMoveEvent(self, event) -> None:
+        drag = self._drag
+        if drag is None:
+            super().mouseMoveEvent(event)
+            return
+        gp = event.globalPosition().toPoint()
+        local = self.mapFromGlobal(gp)
+        drag["px"] = float(local.x() - drag["grab_dx"])
+        drag["vx"] = self._scroll.viewport().mapFromGlobal(gp).x()
+        host_x = drag["vx"] + self._scroll.horizontalScrollBar().value()
+        index = self._target_index(host_x)
+        if index != drag["index"]:
+            drag["index"] = index
+            self._layout_row(animate=True)
+        self.update()
+
+    def mouseReleaseEvent(self, event) -> None:
+        drag = self._drag
+        if drag is None:
+            super().mouseReleaseEvent(event)
+            return
+        index = drag["index"]
+        start = drag["start"]
+        self._end_drag(commit=True)
+        if index != start:
+            self.reorder_requested.emit(self.parent_id, drag["id"], index)
+
+    def _freeze_restore(self, *, preview: bool) -> None:
+        drag = self._drag
+        if drag is None:
+            return
+        order = drag["order"]
+        if preview:
+            others = [c for c in order if c is not drag["chip"]]
+            k = min(drag["index"], len(others))
+            order = others[:k] + [drag["chip"]] + others[k:]
+        for chip in order:
+            chip.show()
+            chip.move(0, chip.y())
+            self._row.addWidget(chip)
+        self._row.addStretch(1)
+        drag["chip"].set_lifted(False)
+
+    def _end_drag(self, *, commit: bool) -> None:
+        if self._drag is None:
+            return
+        self._drag_scroll.stop()
+        if self._drag_anim is not None:
+            self._drag_anim.stop()
+            self._drag_anim = None
+        self._freeze_restore(preview=commit)
+        self.releaseMouse()
+        self.unsetCursor()
+        self._drag = None
+        self._host.setMinimumWidth(self._content_width())
+        self.update()
+
+    def _on_escape(self) -> None:
+        if self._drag is not None:
+            self._end_drag(commit=False)
+            return
+        self._hide_confirm()
 
     # -- the two-step unlock ------------------------------------------
     def _show_confirm(self) -> None:
@@ -601,7 +836,52 @@ class LayerBar(QWidget):
         path = QPainterPath()
         path.moveTo(x + 3, y)
         path.cubicTo(x + 12, y, x + 12, y + 14, x + 32, y + 14)
-        p.setPen(QPen(color(C.brass_deep if self.active_child else C.line_hi), 1))
+        locked = self.convo.is_locked(self.parent_id)
+        elbow = color(C.muted, 200) if locked else color(C.brass_deep if self.active_child else C.line_hi)
+        p.setPen(QPen(elbow, 1))
         p.setBrush(Qt.BrushStyle.NoBrush)
         p.drawPath(path)
+        self._paint_mouth(p)
+        self._paint_drag(p)
         p.end()
+
+    def _paint_drag(self, p: QPainter) -> None:
+        drag = self._drag
+        if drag is None:
+            return
+        pix = drag["pix"]
+        w = pix.width() / pix.devicePixelRatio()
+        h = pix.height() / pix.devicePixelRatio()
+        x, y = drag["px"], drag["y"]
+        p.setPen(Qt.PenStyle.NoPen)
+        for dy, alpha in ((5, 40), (3, 26)):
+            p.setBrush(color("#000000", alpha))
+            p.drawRoundedRect(QRectF(x - 1, y + dy, w + 2, h), 8, 8)
+        p.drawPixmap(int(x), int(y), pix)
+
+    def _paint_mouth(self, p: QPainter) -> None:
+        """Neck, feet and floor under the tab the content below belongs to."""
+        if not MOUTH:
+            return
+        chip = next((c for c in self._chips if c.active), None)
+        if chip is None or not chip.isVisible():
+            return
+        tl = chip.mapTo(self, QPoint(0, 0))
+        x0 = tl.x() + 0.5
+        x1 = x0 + chip.width() - 1.0
+        floor = tl.y() + chip.height() - 0.5
+        foot = 5.0
+        p.setPen(QPen(color(C.brass, 210), 1))
+        p.setBrush(Qt.BrushStyle.NoBrush)
+        left = QPainterPath()
+        left.moveTo(x0, floor - foot)
+        left.quadTo(QPointF(x0, floor), QPointF(x0 - foot, floor))
+        p.drawPath(left)
+        right = QPainterPath()
+        right.moveTo(x1, floor - foot)
+        right.quadTo(QPointF(x1, floor), QPointF(x1 + foot, floor))
+        p.drawPath(right)
+        if MOUTH_FLOOR:
+            p.setPen(QPen(color(C.line_soft), 1))
+            p.drawLine(QPointF(21, floor), QPointF(x0 - foot, floor))
+            p.drawLine(QPointF(x1 + foot, floor), QPointF(self.width() - 10, floor))

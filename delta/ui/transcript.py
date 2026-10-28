@@ -10,14 +10,45 @@ from __future__ import annotations
 
 from collections import OrderedDict
 
-from PySide6.QtCore import QPoint, QRect, QRectF, Qt, QTimer, Signal
-from PySide6.QtGui import QLinearGradient, QPainter
+from PySide6.QtCore import QPoint, QPointF, QRect, QRectF, Qt, QTimer, Signal
+from PySide6.QtGui import QLinearGradient, QPainter, QPen
 from PySide6.QtWidgets import QHBoxLayout, QScrollArea, QSizePolicy, QVBoxLayout, QWidget
 
 from ..core.model import Conversation
 from .forkbar import LayerBar
 from .message import MessageCard
-from .theme import C, color
+from .theme import C, FONT_MONO, color, font
+
+
+class WaterLine(QWidget):
+    """The lock waterline: everything above it is the pinned shortcut chain."""
+
+    def __init__(self, parent=None) -> None:
+        super().__init__(parent)
+        self.setFixedHeight(24)
+        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
+
+    def paintEvent(self, event) -> None:
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        y = self.height() - 6
+        p.setPen(QPen(color(C.brass_dim, 170), 1))
+        p.drawLine(QPointF(21, y), QPointF(self.width() - 10, y))
+        p.setPen(Qt.PenStyle.NoPen)
+        p.setBrush(color(C.bg))
+        p.drawEllipse(QRectF(17.5, y - 3.5, 7, 7))
+        p.setPen(QPen(color(C.brass_dim, 220), 1))
+        p.setBrush(Qt.BrushStyle.NoBrush)
+        p.drawEllipse(QRectF(17.5, y - 3.5, 7, 7))
+        p.setFont(font(FONT_MONO, 7.0, 500, 0.5))
+        p.setPen(color(C.brass_dim))
+        p.drawText(
+            QRectF(self.width() - 340, y - 17, 330, 13),
+            Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter,
+            "基准 · 以上锁止，以下自由",
+        )
+        p.end()
 
 
 class TranscriptView(QScrollArea):
@@ -37,6 +68,7 @@ class TranscriptView(QScrollArea):
         self.convo: Conversation | None = None
         self._rows: list[tuple[str, QWidget]] = []
         self._cards: dict[str, MessageCard] = {}
+        self._pinned_ids: set[str] = set()
         self._layers: dict[str, LayerBar] = {}
         self._open_parent: str | None = None
         self._open_base: str | None = None
@@ -143,6 +175,8 @@ class TranscriptView(QScrollArea):
         last = len(chain) - 1
         for i, node in enumerate(chain):
             rows.append(("n:" + node.id, ("node", node, i == last)))
+            if i < last and node.id == c.baseline_id:
+                rows.append(("w:" + node.id, ("waterline", node.id)))
             active = chain[i + 1].id if i < last else None
             rows.append(("l:" + node.id, ("layer", node.id, active)))
         return rows
@@ -154,6 +188,7 @@ class TranscriptView(QScrollArea):
             self._at_bottom = bool(restore.get("at_bottom", False))
             self._bottom_timer.stop()
         sticky = self._at_bottom if keep_bottom is None else keep_bottom
+        self._pinned_ids = {n.id for n in self.convo.shortcut_chain()}
         spec = self._spec()
         old_keys = [k for k, _ in self._rows]
         new_keys = [k for k, _ in spec]
@@ -180,6 +215,7 @@ class TranscriptView(QScrollArea):
             w.deleteLater()
         self._cards = {k[2:]: w for k, w in self._rows if k.startswith("n:") and isinstance(w, MessageCard)}
         self._layers = {k[2:]: w for k, w in self._rows if k.startswith("l:") and isinstance(w, LayerBar)}
+        QTimer.singleShot(0, self._sync_mouths)
 
         if restore is not None:
             self._pending_restore = restore
@@ -189,18 +225,46 @@ class TranscriptView(QScrollArea):
         self._content.updateGeometry()
         self._column.updateGeometry()
 
+    def _sync_mouths(self) -> None:
+        """Cut each card's top edge where its layer's active tab sits on it."""
+        if self.convo is None:
+            return
+        for node_id, card in self._cards.items():
+            node = self.convo.nodes.get(node_id)
+            bar = self._layers.get(node.parent_id) if node is not None and node.parent_id else None
+            chip = None
+            if bar is not None:
+                chip = next((c for c in bar._chips if c.active and c.child.id == node_id), None)
+            if chip is None:
+                card.set_mouth(None)
+                continue
+            # the bar and the card share the column's left edge, and both have
+            # the same 44px gutter, so the chip's x is already the panel's x
+            scroll = bar._scroll.horizontalScrollBar().value()
+            x0 = float(chip.x() - scroll)
+            card.set_mouth((x0, x0 + chip.width()))
+
     def _make_widget(self, key: str, desc: tuple) -> QWidget:
         cached = self._reuse(key)
+        if desc[0] == "waterline":
+            if isinstance(cached, WaterLine):
+                return cached
+            if cached is not None:
+                cached.setParent(None)
+                cached.deleteLater()
+            return WaterLine(self._column)
         if desc[0] == "node":
             _, node, current = desc
             if isinstance(cached, MessageCard) and cached.node is node:
                 cached.refresh()
                 cached.set_current(current)
+                cached.set_pinned(node.id in self._pinned_ids)
                 return cached
             if cached is not None:
                 cached.setParent(None)
                 cached.deleteLater()
             card = MessageCard(node, current=current)
+            card.set_pinned(node.id in self._pinned_ids)
             card.copy_requested.connect(lambda _nid: self.notice.emit("已复制这条消息", "ok"))
             card.menu_requested.connect(self.menu_requested)
             card.body.typing_started.connect(self.typing_started)
@@ -222,6 +286,7 @@ class TranscriptView(QScrollArea):
             open_base=open_base,
             open_tail=open_tail,
         )
+        bar._scroll.horizontalScrollBar().valueChanged.connect(self._sync_mouths)
         bar.activate_requested.connect(self.activate_requested)
         bar.tail_slot_requested.connect(self.tail_slot_requested)
         bar.slot_requested.connect(self.slot_requested)
@@ -284,6 +349,7 @@ class TranscriptView(QScrollArea):
         idx = ids.index(parent_id) if parent_id in ids else -1
         active = ids[idx + 1] if 0 <= idx < len(ids) - 1 else None
         bar.refresh(active)
+        QTimer.singleShot(0, self._sync_mouths)
 
     def row_widgets(self) -> dict[str, QWidget]:
         return dict(self._rows)
@@ -416,6 +482,7 @@ class TranscriptView(QScrollArea):
 
     def resizeEvent(self, event) -> None:
         super().resizeEvent(event)
+        self._sync_mouths()
         self._place_fade()
         if self._pending_restore is None:
             self._pending_restore = self.capture()
