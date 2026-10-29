@@ -18,6 +18,7 @@ from ..core.model import Conversation
 from .forkbar import LayerBar
 from .message import MessageCard
 from .theme import C, FONT_MONO, color, font
+from .turnrail import Turn, TurnRail
 
 
 class WaterLine(QWidget):
@@ -117,6 +118,8 @@ class TranscriptView(QScrollArea):
         self.setWidget(self._content)
         self._fade = _BottomFade(self.viewport())
         self._fade.raise_()
+        self.turnrail = TurnRail(self.viewport())
+        self.turnrail.navigate.connect(self._rail_navigate)
         self.verticalScrollBar().valueChanged.connect(self._on_scroll)
         self.verticalScrollBar().rangeChanged.connect(self._on_range)
 
@@ -224,6 +227,7 @@ class TranscriptView(QScrollArea):
             self._bottom_timer.start()
         self._content.updateGeometry()
         self._column.updateGeometry()
+        self._sync_rail()
 
     def _sync_mouths(self) -> None:
         """Cut each card's top edge where its layer's active tab sits on it."""
@@ -329,6 +333,7 @@ class TranscriptView(QScrollArea):
             card.update_stream()
             if self._at_bottom:
                 self._bottom_timer.start()
+            self._sync_rail()
 
     def refresh_node(self, node_id: str) -> None:
         card = self._cards.get(node_id)
@@ -337,6 +342,7 @@ class TranscriptView(QScrollArea):
             card.set_current(self.convo.view_leaf() == node_id if self.convo else False)
             if self._at_bottom:
                 self._bottom_timer.start()
+            self._sync_rail()
 
     def refresh_layer(self, parent_id: str, *, text_only: bool = False) -> None:
         bar = self._layers.get(parent_id)
@@ -362,6 +368,74 @@ class TranscriptView(QScrollArea):
         if hasattr(win, "composer"):
             win.composer.focus_input()
 
+    # -- turn rail -----------------------------------------------------
+    def rail_turns(self) -> list[Turn]:
+        """One entry per turn of the current view: a prompt and its answer.
+
+        A turn starts at a user node.  A chain can also open on an answer (a
+        baseline sits on an assistant node), so an orphan answer keeps its own
+        place instead of disappearing from the ladder.
+        """
+        if self.convo is None:
+            return []
+        turns: list[Turn] = []
+        for node in self.convo.view():
+            if node.role == "user":
+                turns.append(Turn(node.id, node.text or "", ""))
+            elif not turns:
+                turns.append(Turn(node.id, "", node.text or ""))
+            else:
+                last = turns[-1]
+                turns[-1] = Turn(last.node_id, last.prompt, node.text or "")
+        return turns
+
+    def rail_active(self, turns: list[Turn]) -> int:
+        """Which turn the reader is in: the one crossing the reading line.
+
+        The line sits a little below the viewport top (at most 96px, or a fifth
+        of the band), so a turn that has only just started still counts as the
+        one being read.  At the bottom the last turn wins outright — otherwise a
+        two-line final answer would never light up.
+        """
+        if not turns:
+            return -1
+        bar = self.verticalScrollBar()
+        if bar.maximum() - bar.value() <= 2:
+            return len(turns) - 1
+        line = bar.value() + min(96, int(self.viewport().height() * 0.2))
+        active = 0
+        for index, turn in enumerate(turns):
+            card = self._cards.get(turn.node_id)
+            if card is None:
+                continue
+            if card.mapTo(self._content, QPoint(0, 0)).y() <= line:
+                active = index
+            else:
+                break
+        return active
+
+    def _sync_rail(self) -> None:
+        turns = self.rail_turns()
+        self.turnrail.set_state(turns, self.rail_active(turns))
+        vp = self.viewport()
+        right = self._column.mapTo(vp, QPoint(self._column.width(), 0)).x()
+        self.turnrail.place(vp.width(), vp.height(), right)
+
+    def _rail_navigate(self, node_id: str) -> None:
+        self.scroll_to_node(node_id, offset=24)
+        # rows still settle after a rebuild (a card's height is only final once
+        # it has been laid out), so land twice: now, then once the scroll range
+        # has caught up
+        QTimer.singleShot(30, lambda: self._land_on_turn(node_id))
+
+    def _land_on_turn(self, node_id: str) -> None:
+        card = self._cards.get(node_id)
+        if card is not None:
+            top = card.mapTo(self.viewport(), QPoint(0, 0)).y()
+            if abs(top - 24) > 2:
+                self.scroll_to_node(node_id, offset=24)
+        self._sync_rail()
+
     # -- scroll --------------------------------------------------------
     def _on_range(self, min_v: int, max_v: int) -> None:
         if self._pending_restore is not None:
@@ -376,6 +450,7 @@ class TranscriptView(QScrollArea):
         sb = self.verticalScrollBar()
         self._at_bottom = value >= sb.maximum() - 2
         self._save_timer.start()
+        self._sync_rail()
 
     def _pin_bottom(self) -> None:
         if not self._at_bottom or self.convo is None:
@@ -387,6 +462,7 @@ class TranscriptView(QScrollArea):
         finally:
             self._internal = False
         self._save_timer.start()
+        self._sync_rail()
 
     def scroll_to_bottom(self) -> None:
         self._at_bottom = True
@@ -461,13 +537,14 @@ class TranscriptView(QScrollArea):
         self._pending_restore = None
         self._at_bottom = current >= sb.maximum() - 2
         self._save_timer.start()
+        self._sync_rail()
 
-    def scroll_to_key(self, key: str) -> None:
+    def scroll_to_key(self, key: str, *, offset: int = 72) -> None:
         for k, w in self._rows:
             if k == key:
                 top = w.mapTo(self._content, QPoint(0, 0)).y()
                 sb = self.verticalScrollBar()
-                target = max(0, min(sb.maximum(), top - 72))
+                target = max(0, min(sb.maximum(), top - offset))
                 self._internal = True
                 try:
                     sb.setValue(target)
@@ -475,15 +552,17 @@ class TranscriptView(QScrollArea):
                     self._internal = False
                 self._at_bottom = target >= sb.maximum() - 2
                 self._save_timer.start()
+                self._sync_rail()
                 return
 
-    def scroll_to_node(self, node_id: str) -> None:
-        self.scroll_to_key("n:" + node_id)
+    def scroll_to_node(self, node_id: str, *, offset: int = 72) -> None:
+        self.scroll_to_key("n:" + node_id, offset=offset)
 
     def resizeEvent(self, event) -> None:
         super().resizeEvent(event)
         self._sync_mouths()
         self._place_fade()
+        self._sync_rail()
         if self._pending_restore is None:
             self._pending_restore = self.capture()
             self._restore_tries = 0
