@@ -375,18 +375,33 @@ class TranscriptView(QScrollArea):
         A turn starts at a user node.  A chain can also open on an answer (a
         baseline sits on an assistant node), so an orphan answer keeps its own
         place instead of disappearing from the ladder.
+
+        `locked` marks the turns at or above the baseline — the shortcut chain.
+        The rail paints those grey and the route below it gold, so a glance at
+        the ladder says where the lock ends, the same sentence the watermark and
+        ATLAS already say.
         """
         if self.convo is None:
             return []
+        chain = self.convo.view()
+        cut = 0
+        baseline = self.convo.baseline_id
+        if baseline is not None:
+            cut = len(chain)
+            for index, node in enumerate(chain):
+                if node.id == baseline:
+                    cut = index + 1
+                    break
         turns: list[Turn] = []
-        for node in self.convo.view():
+        for index, node in enumerate(chain):
+            locked = index < cut
             if node.role == "user":
-                turns.append(Turn(node.id, node.text or "", ""))
+                turns.append(Turn(node.id, node.text or "", "", locked))
             elif not turns:
-                turns.append(Turn(node.id, "", node.text or ""))
+                turns.append(Turn(node.id, "", node.text or "", locked))
             else:
                 last = turns[-1]
-                turns[-1] = Turn(last.node_id, last.prompt, node.text or "")
+                turns[-1] = Turn(last.node_id, last.prompt, node.text or "", last.locked)
         return turns
 
     def rail_active(self, turns: list[Turn]) -> int:

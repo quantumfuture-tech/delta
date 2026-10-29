@@ -58,6 +58,26 @@ def test_turns_group_prompt_with_its_answer(view):
     assert len(turns) == 4
 
 
+def test_marks_split_at_the_waterline(view):
+    c = open_view(view, 10)
+    c.set_baseline(c.view()[11].id)  # the answer of the sixth turn
+    view.rebuild()
+    QTest.qWait(40)
+    locked = [t.locked for t in view.rail_turns()]
+    assert locked == [True] * 6 + [False] * 4
+
+
+def test_grey_above_the_waterline_gold_below():
+    """The two families are the interface's existing channels, not new colours."""
+    from delta.ui import turnrail
+
+    for state in (turnrail.IDLE, turnrail.HOVER, turnrail.ACTIVE):
+        grey = turnrail.mark_pen(True, state)
+        gold = turnrail.mark_pen(False, state)
+        assert grey.red() - grey.blue() < 60, "locked marks must read neutral"
+        assert gold.red() - gold.blue() > 90, "route marks must read warm"
+
+
 def test_rail_active_is_the_last_turn_at_the_bottom(view):
     open_view(view, 10)
     view.scroll_to_bottom()

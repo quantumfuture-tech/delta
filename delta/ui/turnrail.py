@@ -48,21 +48,33 @@ SHADOW = 8
 PROMPT_PREVIEW = 50
 RESPONSE_PREVIEW = 120
 
-# Delta's own channels: structure grey for the ladder, brass for the mark under
-# the pointer, ink for the turn being read.  Gold is never used here — it still
-# means "the route" everywhere else in the window.
-IDLE = color(C.faint, 165)
-HOVER = color(C.brass)
-ACTIVE = color(C.ink)
+# Two families, one watermark.  The turns at or above the baseline sit on the
+# locked shortcut chain, so they speak the structural grey that the lock and
+# ATLAS's shortcut edges already speak; the turns below it are the route, so
+# they speak the route's gold.  Length alone says how prominent a mark is.
+GREYS = (color(C.faint), color(C.ink_dim), color(C.ink))
+GOLDS = (color(C.brass, 175), color(C.brass), color(C.brass_hi))
+
+IDLE, HOVER, ACTIVE = 0, 1, 2
+
+
+def mark_pen(locked: bool, state: int) -> QColor:
+    """The pen for one mark: grey on the locked chain, gold on the route."""
+    return (GREYS if locked else GOLDS)[state]
 
 
 @dataclass(frozen=True)
 class Turn:
-    """One turn: a prompt, the answer it drew, and the row to scroll to."""
+    """One turn: a prompt, the answer it drew, and the row to scroll to.
+
+    `locked` says the turn sits at or above the baseline, i.e. on the shortcut
+    chain the interface already paints grey everywhere else.
+    """
 
     node_id: str
     prompt: str
     response: str
+    locked: bool = False
 
 
 def preview(text: str | None, limit: int) -> str:
@@ -101,6 +113,7 @@ class TurnCard(QWidget):
         super().__init__(parent)
         self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
         self._index = 0
+        self._locked = False
         self._prompt = ""
         self._response_lines: list[str] = []
         self._prompt_h = 16
@@ -108,8 +121,9 @@ class TurnCard(QWidget):
         self.resize(CARD_W + 2 * SHADOW, CARD_MAX_H + 2 * SHADOW)
         self.hide()
 
-    def set_turn(self, index: int, prompt: str, response: str) -> None:
+    def set_turn(self, index: int, prompt: str, response: str, locked: bool) -> None:
         self._index = index
+        self._locked = locked
         inner = CARD_W - 2 * CARD_PAD_X
         prompt_font = font(FONT_CJK, 10.0, 600)
         response_font = font(FONT_CJK, 9.0)
@@ -157,9 +171,11 @@ class TurnCard(QWidget):
         p.setPen(QPen(color(C.line), 1))
         p.drawRoundedRect(surface, 10, 10)
 
-        # the brass tick faces the rail, so the card reads as belonging to that mark
+        # the tick faces the rail and borrows the family of the mark it belongs
+        # to, so the card reads as that mark's card and not as a floating panel
+        accent = C.ink_dim if self._locked else C.brass
         p.setPen(Qt.PenStyle.NoPen)
-        p.setBrush(color(C.brass_deep))
+        p.setBrush(color(accent))
         p.drawRoundedRect(
             QRectF(surface.right() - 2, surface.top() + 10, 2, surface.height() - 20), 1, 1
         )
@@ -167,7 +183,7 @@ class TurnCard(QWidget):
         left = surface.left() + CARD_PAD_X
         top = surface.top() + CARD_PAD_Y
         p.setFont(font(FONT_MONO, 8.0))
-        p.setPen(color(C.brass_deep))
+        p.setPen(color(C.muted if self._locked else C.brass_deep))
         p.drawText(
             QRectF(left, top, CARD_NUM_W, self._prompt_h),
             Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
@@ -285,16 +301,16 @@ class TurnRail(QWidget):
         p = QPainter(self)
         p.setRenderHint(QPainter.RenderHint.Antialiasing, True)
         right = float(self.width())
-        for index in range(len(self._turns)):
+        for index, turn in enumerate(self._turns):
             y = self._mark_y(index)
             if y < -MARK_H or y > self.height() + MARK_H:
                 continue
             if index == self._active:
-                self._mark(p, right, y, W_ACTIVE, ACTIVE)
+                self._mark(p, right, y, W_ACTIVE, mark_pen(turn.locked, ACTIVE))
             elif index == self._hover:
-                self._mark(p, right, y, W_HOVER, HOVER)
+                self._mark(p, right, y, W_HOVER, mark_pen(turn.locked, HOVER))
             else:
-                self._mark(p, right, y, W_IDLE, IDLE)
+                self._mark(p, right, y, W_IDLE, mark_pen(turn.locked, IDLE))
         if self._overflow > 0:
             self._fade_edges(p)
         p.end()
@@ -354,7 +370,7 @@ class TurnRail(QWidget):
             self._card.hide()
             return
         turn = self._turns[index]
-        self._card.set_turn(index, turn.prompt, turn.response)
+        self._card.set_turn(index, turn.prompt, turn.response, turn.locked)
         height = self._card.height()
         top = self._mark_y(index) - height / 2
         top = max(-SHADOW, min(top, self.height() - height + SHADOW))
