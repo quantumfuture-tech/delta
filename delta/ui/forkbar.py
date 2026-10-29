@@ -22,6 +22,7 @@ from PySide6.QtCore import (
 from PySide6.QtGui import QFontMetrics, QKeySequence, QPainter, QPainterPath, QPen, QShortcut
 from PySide6.QtWidgets import (
     QHBoxLayout,
+    QToolTip,
     QLabel,
     QMenu,
     QScrollArea,
@@ -487,6 +488,9 @@ class LayerBar(QWidget):
 
     # -- state ---------------------------------------------------------
     def _clear(self) -> None:
+        # a chip's tooltip can outlive the chip and get parked at the screen
+        # corner when its anchor disappears
+        QToolTip.hideText()
         while self._row.count():
             item = self._row.takeAt(0)
             widget = item.widget()
@@ -897,4 +901,5 @@ class LayerBar(QWidget):
             p.setPen(QPen(color(C.line_soft), 1))
             p.drawLine(QPointF(21, floor), QPointF(x0 - foot, floor))
             p.drawLine(QPointF(x1 + foot, floor), QPointF(self.width() - 10, floor))
+
 

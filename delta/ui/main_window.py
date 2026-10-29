@@ -50,6 +50,7 @@ from .message import error_detail, error_title
 from .notice import NoticeBar
 from .rail import Rail
 from .theme import C, FONT_UI, color, font
+from .trace import mark as trace_mark
 from .transcript import TranscriptView
 from .widgets import Toast, fmt_count
 from .worker import StreamJob
@@ -742,6 +743,7 @@ class MainWindow(QMainWindow):
         self.toast.show_message(f"已关闭 {removed} 条消息", "ok")
 
     def _reorder(self, parent_id: str, child_id: str, index: int) -> None:
+        trace_mark(f"reorder {child_id[-6:]} -> {index}")
         try:
             commands.reorder(self.convo, parent_id, child_id, index)
         except LayerLocked:
