@@ -48,6 +48,48 @@ def pump(app, ms: int) -> None:
         time.sleep(0.004)
 
 
+class BlockingClient:
+    """Emits a short prefix, then parks until the job is cancelled.
+
+    The interruption test used to race the wall clock: `FakeClient(delay=0.02)`
+    plus a fixed pump, so on a busy machine the worker finished all 40 chunks
+    before the pump drained them and "interrupted" came out "complete" (and on a
+    quieter one the text overshot its budget instead).  Here the test — not the
+    clock — decides when the stop button is pressed.
+    """
+
+    api_key = "sk-test"
+
+    def __init__(self, chunks, prefix=3):
+        self.chunks = chunks
+        self.prefix = prefix
+        self.calls = []
+
+    def stream(self, messages, model, cancel=None, on_delta=None):
+        self.calls.append([dict(m) for m in messages])
+        text = ""
+        for index, chunk in enumerate(self.chunks):
+            if cancel is not None and cancel.is_set():
+                return StreamResult(text=text, status="cancelled")
+            on_delta("content", chunk)
+            text += chunk
+            if index + 1 >= self.prefix:
+                while cancel is not None:
+                    if cancel.wait(0.005):
+                        return StreamResult(text=text, status="cancelled")
+        return StreamResult(text=text, status="complete", finish_reason="stop")
+
+
+def wait_until(app, predicate, timeout=4.0) -> bool:
+    end = time.time() + timeout
+    while time.time() < end:
+        app.processEvents()
+        if predicate():
+            return True
+        time.sleep(0.008)
+    return predicate()
+
+
 def wait_idle(app, window, timeout=4.0) -> bool:
     end = time.time() + timeout
     while time.time() < end:
@@ -145,11 +187,11 @@ def test_stream_complete_and_persist(qapp, window):
 
 
 def test_interrupt_preserves_partial(qapp, window):
-    window.client = FakeClient([str(i) for i in range(40)], delay=0.02)
+    window.client = BlockingClient([str(i) for i in range(40)], prefix=3)
     window._send("long")
-    pump(qapp, 180)
+    assert wait_until(qapp, lambda: len(window.convo.view()[-1].text) >= 3)
     window._stop_generation()
-    pump(qapp, 60)
+    assert wait_idle(qapp, window)
     chain = window.convo.view()
     assert window._job is None
     assert len(chain) == 2
