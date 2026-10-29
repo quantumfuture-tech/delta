@@ -4,9 +4,9 @@ Command:
 
     & D:\LMY\coding\aichat\_py\Scripts\python.exe -m pytest -q
 
-Result (2026-10-29, Windows 11, Python 3.14.4, PySide6 6.12.0):
+Result (2026-10-30, Windows 11, Python 3.14.4, PySide6 6.12.0):
 
-    130 passed in 17.59s
+    138 passed in 77.12s (0:01:17)
 
 Raw output: [pytest-output.txt](pytest-output.txt)
 
@@ -46,6 +46,7 @@ Raw output: [pytest-output.txt](pytest-output.txt)
 | UI: rapid | test_ui.py | second send while streaming ignored; switching layers mid-stream; double stop; partial text stays on its own node |
 | UI: no bypass | test_ui.py | a static scan of delta/ui asserts no direct layer write, no raw scope call, no direct convo.create/activate/close/reorder/send/ask/answer/abandon, no old API names |
 | Streaming text | test_markdown.py | fast draft strips syntax markers but keeps content |
+| UI: turn rail | test_turnrail.py | one mark per turn, prompt grouped with its answer; the active mark is the last turn at the bottom and the turn crossing the reading line elsewhere; a click scrolls that turn to 24px below the top and leaves the baseline alone; the frame caps at 420px and scrolls inside itself, a short rail ignores the wheel; fewer than two turns draws nothing; the preview card opens left of the rail, centred on its mark, and carries the turn number plus clipped prompt/response |
 
 ## Acceptance mapping
 
@@ -58,6 +59,7 @@ Raw output: [pytest-output.txt](pytest-output.txt)
 ## Not covered / known
 
 - Still open in the visual layer: the scrollbar look, and re-shooting the screenshots (they predate the flush tab).
+- The interrupt test no longer races the wall clock: the fake client emits a short prefix and then parks until the job is cancelled, so "interrupted" cannot flip to "complete" on a busy machine (it did, twice, before this change).
 - Single-child layers keep their own 72px labelled row, not a connected tab; every layer adds a row, so long conversations scroll longer.
 - The current screenshots show behavior, not final visual design.
 - All UI writes go through commands; the one declared repair is RepairEmpty (a streaming placeholder that never received text), also a command with a write layer and a gate.
