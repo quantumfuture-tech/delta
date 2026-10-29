@@ -422,18 +422,24 @@ class TranscriptView(QScrollArea):
         self.turnrail.place(vp.width(), vp.height(), right)
 
     def _rail_navigate(self, node_id: str) -> None:
+        # a jump is never "following the bottom": say so before moving, or a
+        # range change from a still-growing row would pin us back to the end
+        self._at_bottom = False
+        self._bottom_timer.stop()
         self.scroll_to_node(node_id, offset=24)
-        # rows still settle after a rebuild (a card's height is only final once
-        # it has been laid out), so land twice: now, then once the scroll range
-        # has caught up
-        QTimer.singleShot(30, lambda: self._land_on_turn(node_id))
+        self._land_on_turn(node_id, 0)
 
-    def _land_on_turn(self, node_id: str) -> None:
+    def _land_on_turn(self, node_id: str, tries: int) -> None:
+        """Land twice: rows settle after a rebuild, so the first scroll can clamp."""
         card = self._cards.get(node_id)
         if card is not None:
             top = card.mapTo(self.viewport(), QPoint(0, 0)).y()
-            if abs(top - 24) > 2:
+            if abs(top - 24) > 2 and tries < 6:
                 self.scroll_to_node(node_id, offset=24)
+                QTimer.singleShot(30, lambda: self._land_on_turn(node_id, tries + 1))
+                return
+        bar = self.verticalScrollBar()
+        self._at_bottom = bar.value() >= bar.maximum() - 2
         self._sync_rail()
 
     # -- scroll --------------------------------------------------------
@@ -550,7 +556,9 @@ class TranscriptView(QScrollArea):
                     sb.setValue(target)
                 finally:
                     self._internal = False
-                self._at_bottom = target >= sb.maximum() - 2
+                # a programmatic jump is not "following the bottom"; the caller
+                # that knows the settled range re-decides (see _land_on_turn)
+                self._at_bottom = False
                 self._save_timer.start()
                 self._sync_rail()
                 return

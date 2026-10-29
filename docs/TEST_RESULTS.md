@@ -6,7 +6,7 @@ Command:
 
 Result (2026-10-30, Windows 11, Python 3.14.4, PySide6 6.12.0):
 
-    138 passed in 77.12s (0:01:17)
+    138 passed in 44.43s
 
 Raw output: [pytest-output.txt](pytest-output.txt)
 

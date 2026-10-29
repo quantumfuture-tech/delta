@@ -20,7 +20,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from PySide6.QtCore import QRectF, Qt, Signal
-from PySide6.QtGui import QColor, QFontMetrics, QLinearGradient, QPainter, QPen
+from PySide6.QtGui import QColor, QFont, QFontMetrics, QLinearGradient, QPainter, QPen, QTextLayout
 from PySide6.QtWidgets import QWidget
 
 from .theme import C, FONT_CJK, FONT_MONO, color, font
@@ -73,35 +73,25 @@ def preview(text: str | None, limit: int) -> str:
     return body
 
 
-def _wrap(text: str, metrics: QFontMetrics, width: int, max_lines: int) -> list[str]:
-    """Greedy wrap that also breaks a single word/paragraph wider than the line.
+def _wrap(text: str, font_: QFont, width: int, max_lines: int) -> list[str]:
+    """Break `text` into at most `max_lines` lines using Qt's own line breaker.
 
-    Chinese has no spaces, so a paragraph arrives as one "word"; the inner loop
-    is what actually lays this card out.
+    Qt splits CJK between characters and latin between words, which is exactly
+    what a hand-rolled greedy wrapper gets wrong (it tends to strand a short
+    latin token on a line of its own before a long Chinese paragraph).
     """
+    layout = QTextLayout(text, font_)
+    layout.beginLayout()
     lines: list[str] = []
-    current = ""
-    for word in text.split(" "):
-        candidate = word if not current else current + " " + word
-        if metrics.horizontalAdvance(candidate) <= width:
-            current = candidate
-            continue
-        if current:
-            lines.append(current)
-            if len(lines) >= max_lines:
-                return lines[:max_lines]
-        while metrics.horizontalAdvance(word) > width:
-            cut = len(word)
-            while cut > 1 and metrics.horizontalAdvance(word[:cut]) > width:
-                cut -= 1
-            lines.append(word[:cut])
-            if len(lines) >= max_lines:
-                return lines[:max_lines]
-            word = word[cut:]
-        current = word
-    if current and len(lines) < max_lines:
-        lines.append(current)
-    return lines[:max_lines]
+    while len(lines) < max_lines:
+        line = layout.createLine()
+        if not line.isValid():
+            break
+        line.setLineWidth(width)
+        start = line.textStart()
+        lines.append(text[start : start + line.textLength()].rstrip())
+    layout.endLayout()
+    return [line for line in lines if line]
 
 
 class TurnCard(QWidget):
@@ -132,17 +122,20 @@ class TurnCard(QWidget):
         )
         self._prompt_h = fm_prompt.height()
         body = preview(response, RESPONSE_PREVIEW).rstrip("。，、；：,.;: ")
-        self._response_lines = _wrap(body, fm_response, inner, 3)
+        self._response_lines = _wrap(body, response_font, inner, 3) if body else []
         if body:
-            # if the card had to cut the answer, the cut must be visible — and a
-            # stray "。" pushed onto the third line is not a cut, it is noise
-            spare = _wrap(body, fm_response, inner, 4)
-            if len(spare) > 3:
-                lines = spare[:3]
-                last = lines[-1].rstrip("。，、；： ")
+            # an answer cut by the card must say so: trim the last line and put
+            # an ellipsis in it — a dangling "。" on its own line is not a cut
+            joined = "".join(self._response_lines).replace(" ", "")
+            if joined != body.replace(" ", ""):
+                lines = list(self._response_lines)
+                last = (lines[-1] if lines else "").rstrip("。，、；： ")
                 while last and fm_response.horizontalAdvance(last + "…") > inner:
                     last = last[:-1]
-                lines[-1] = (last + "…") if last else "…"
+                if lines:
+                    lines[-1] = (last + "…") if last else "…"
+                else:
+                    lines = ["…"]
                 self._response_lines = lines
         self._line_h = fm_response.lineSpacing()
         height = CARD_PAD_Y * 2 + self._prompt_h
