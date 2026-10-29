@@ -6,7 +6,7 @@ Command:
 
 Result (2026-10-30, Windows 11, Python 3.14.4, PySide6 6.12.0):
 
-    138 passed in 44.43s
+    151 passed in 29.16s
 
 Raw output: [pytest-output.txt](pytest-output.txt)
 
@@ -38,6 +38,7 @@ Raw output: [pytest-output.txt](pytest-output.txt)
 | UI: locks | test_ui.py | clicking a locked tab does not switch; confirming raises the baseline; sending on a locked write layer writes nothing and keeps the draft; after unlocking, send again works |
 | UI: tab drag | test_ui.py | a real gesture (press, move past 6px, drop) hides the chip, opens the gap, posts one reorder and leaves the view alone; Esc puts the tab back and writes nothing |
 | UI: proposal | test_ui.py | propose question replaces the draft only; no node; draft dirty |
+| UI: ATLAS axes | test_atlas_layout.py | fit recomputes and fixed keeps its pitch; dragging the left ruler pins the axis from its displayed value, double-click returns it to fit; Ctrl+wheel scales only pinned axes and does nothing when both fit; a single overflow gets the wheel, both overflows take it vertically only; dragging the canvas pans past a 6px threshold and never clicks a node, and pauses following; the minimap clamps inside the canvas, resizes from its bottom-left with the top-right pinned, and its frame pans the canvas; the hover card moves to the side away from its dot |
 | UI: ATLAS encodings | test_atlas.py | edge roles split at the baseline (root -> baseline is the shortcut, below it the route, siblings are plain); one default edge per layer; node tags for baseline / current / shortcut / branch |
 | UI: ATLAS click | test_ui.py | clicking a node changes the baseline and nothing else: node count, per-layer defaults and display order stay; the lock set is derived from the shortcut chain |
 | UI: incremental | test_ui.py | a switch preserves the exact widget objects in the common prefix; off-screen cards are reused on return |
@@ -63,3 +64,4 @@ Raw output: [pytest-output.txt](pytest-output.txt)
 - Single-child layers keep their own 72px labelled row, not a connected tab; every layer adds a row, so long conversations scroll longer.
 - The current screenshots show behavior, not final visual design.
 - All UI writes go through commands; the one declared repair is RepairEmpty (a streaming placeholder that never received text), also a command with a write layer and a gate.
+

@@ -234,6 +234,7 @@ class MainWindow(QMainWindow):
         al.setContentsMargins(0, 0, 0, 0)
         al.setSpacing(0)
         self.atlas = AtlasView(self.atlas_panel)
+        self.atlas.bind_settings(self.settings)
         al.addWidget(self.atlas)
         outer.addWidget(self.atlas_panel)
 
