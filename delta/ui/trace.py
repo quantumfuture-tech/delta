@@ -7,8 +7,8 @@ reproduce an elusive flash and hand over a log that says what actually appeared.
 from __future__ import annotations
 
 import os
+from datetime import datetime
 from pathlib import Path
-from time import strftime
 
 
 def enabled() -> bool:
@@ -27,7 +27,8 @@ def path() -> Path:
 def write(text: str) -> None:
     if not enabled():
         return
-    stamp = strftime("%H:%M:%S") + f".{int(strftime('%f')[:3]):03d}"
+    # time.strftime has no %f on Windows, so the stamp comes from datetime
+    stamp = datetime.now().strftime("%H:%M:%S.%f")[:-3]
     try:
         with path().open("a", encoding="utf-8") as fh:
             fh.write(f"{stamp} {text}\n")
