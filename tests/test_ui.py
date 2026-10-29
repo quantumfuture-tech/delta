@@ -746,12 +746,33 @@ def test_drag_reorders_the_layer_without_moving_the_view(qapp, window):
         QEvent.Type.MouseButtonRelease, QPointF(bar.mapFromGlobal(gp)), QPointF(gp),
         Qt.MouseButton.LeftButton, Qt.MouseButton.NoButton, Qt.KeyboardModifier.NoModifier,
     )
+    before = {id(w) for w in QApplication.topLevelWidgets() if w.isVisible()}
     QApplication.sendEvent(bar, release)
+    stray = [
+        w for w in QApplication.topLevelWidgets()
+        if w.isVisible() and w.parent() is None and id(w) not in before
+    ]
     pump(qapp, 60)
+    assert stray == [], "a detached chip flashed as a top-level window"
     assert bar._drag is None
     assert c.display_ids(u1.id) == [b2.id, b1.id]
     assert c.nodes[u1.id].default_child == b1.id
     assert c.view()[-1].id == b1.id
+
+
+def test_clearing_chips_hides_them_before_detaching(qapp, window):
+    """A visible child that loses its parent becomes a top-level window.
+
+    That is the flash of small blank windows at the screen corner reported after
+    letting go of a dragged tab: refresh() clears the strip, and each chip used
+    to be reparented to nothing while still visible.
+    """
+    c, u0, a1, u1, b1, b2, a2 = seed(window, qapp)
+    bar = window.transcript._layers[u1.id]
+    chips = list(bar._chips)
+    assert chips and all(chip.isVisible() for chip in chips)
+    bar._clear()
+    assert all(not chip.isVisible() for chip in chips)
 
 
 def test_drag_escape_puts_the_tab_back(qapp, window):

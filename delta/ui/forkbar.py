@@ -491,6 +491,9 @@ class LayerBar(QWidget):
             item = self._row.takeAt(0)
             widget = item.widget()
             if widget is not None:
+                # hide before letting go: a visible widget that loses its parent
+                # becomes a top-level window and flashes at the screen corner
+                widget.hide()
                 widget.setParent(None)
                 widget.deleteLater()
         self._chips = []
@@ -894,3 +897,4 @@ class LayerBar(QWidget):
             p.setPen(QPen(color(C.line_soft), 1))
             p.drawLine(QPointF(21, floor), QPointF(x0 - foot, floor))
             p.drawLine(QPointF(x1 + foot, floor), QPointF(self.width() - 10, floor))
+

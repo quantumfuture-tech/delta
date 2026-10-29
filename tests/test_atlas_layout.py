@@ -7,7 +7,7 @@ from PySide6.QtWidgets import QApplication
 
 from delta.core import commands
 from delta.core.model import Conversation
-from delta.ui.atlas import MM_MIN, X_MAX, Y_MAX, ZOOM_STEP, AtlasView
+from delta.ui.atlas import MM_CHIP, MM_MIN, X_MAX, Y_MAX, ZOOM_STEP, AtlasView
 
 
 def chain(layers: int) -> Conversation:
@@ -208,6 +208,24 @@ def test_clicking_the_minimap_pans_the_canvas(atlas):
     assert atlas._scroll.y() > 0
 
 
+def test_minimap_collapses_to_a_chip_and_back(atlas):
+    open_atlas(atlas, 40)
+    atlas._axis["y"] = {"mode": "fixed", "value": 60.0}
+    atlas.refresh()
+    full = atlas.minimap_rect()
+    assert full.width() >= MM_MIN
+    assert atlas.minimap_zone(QPointF(full.left() + 4, full.top() + 4)) == "collapse"
+
+    atlas.set_minimap_open(False)
+    chip = atlas.minimap_rect()
+    assert chip.width() == pytest.approx(MM_CHIP)
+    assert chip.right() == pytest.approx(full.right(), abs=1)
+    assert atlas.minimap_zone(chip.center()) == "chip"
+
+    atlas.set_minimap_open(True)
+    assert atlas.minimap_rect().width() == pytest.approx(full.width(), abs=1)
+
+
 def test_the_hover_card_moves_out_of_the_way(atlas):
     open_atlas(atlas, 40)
     atlas._axis["y"] = {"mode": "fixed", "value": 48.0}
@@ -218,3 +236,4 @@ def test_the_hover_card_moves_out_of_the_way(atlas):
     lower = max(atlas._pix.items(), key=lambda kv: kv[1].y())
     assert atlas.hover_box(upper[0]).top() > plot.center().y()
     assert atlas.hover_box(lower[0]).top() < plot.center().y()
+

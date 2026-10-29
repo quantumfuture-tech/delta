@@ -139,10 +139,12 @@ class TranscriptView(QScrollArea):
 
     def _clear_rows(self) -> None:
         for _, w in self._rows:
+            w.hide()
             w.setParent(None)
             w.deleteLater()
         self._rows = []
         for _, w in self._cache.items():
+            w.hide()
             w.setParent(None)
             w.deleteLater()
         self._cache.clear()
@@ -150,6 +152,7 @@ class TranscriptView(QScrollArea):
     def _stash(self, key: str, widget: QWidget) -> None:
         node_id = key[2:]
         if node_id not in (self.convo.nodes if self.convo else {}):
+            widget.hide()
             widget.setParent(None)
             widget.deleteLater()
             return
@@ -159,6 +162,7 @@ class TranscriptView(QScrollArea):
         self._cache.move_to_end(key)
         if len(self._cache) > 80:
             _, old = self._cache.popitem(last=False)
+            old.hide()
             old.setParent(None)
             old.deleteLater()
 
@@ -214,6 +218,7 @@ class TranscriptView(QScrollArea):
         stale = [k for k, w in self._cache.items() if k[2:] not in self.convo.nodes]
         for k in stale:
             w = self._cache.pop(k)
+            w.hide()
             w.setParent(None)
             w.deleteLater()
         self._cards = {k[2:]: w for k, w in self._rows if k.startswith("n:") and isinstance(w, MessageCard)}
@@ -254,6 +259,7 @@ class TranscriptView(QScrollArea):
             if isinstance(cached, WaterLine):
                 return cached
             if cached is not None:
+                cached.hide()
                 cached.setParent(None)
                 cached.deleteLater()
             return WaterLine(self._column)
@@ -265,6 +271,7 @@ class TranscriptView(QScrollArea):
                 cached.set_pinned(node.id in self._pinned_ids)
                 return cached
             if cached is not None:
+                cached.hide()
                 cached.setParent(None)
                 cached.deleteLater()
             card = MessageCard(node, current=current)

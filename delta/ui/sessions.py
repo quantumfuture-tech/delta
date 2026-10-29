@@ -180,6 +180,7 @@ class SessionsSheet(SheetBase):
             item = self._list.takeAt(0)
             w = item.widget()
             if w is not None:
+                w.hide()
                 w.setParent(None)
                 w.deleteLater()
         self._rows = []

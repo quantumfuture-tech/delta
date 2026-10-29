@@ -50,6 +50,43 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _install_trace(app: QApplication) -> None:
+    """Record every top-level window that gets shown, when tracing is on.
+
+    Set `DELTA_UI_TRACE=1` (or to a file path) and reproduce: the log names the
+    class, geometry and whether it had a parent.  It exists because a flash of
+    small empty windows at the screen corner after a tab drag could not be
+    reproduced in-process; the next report can carry evidence instead of a guess.
+    """
+    setting = os.environ.get("DELTA_UI_TRACE")
+    if not setting:
+        return
+    from time import strftime
+
+    from PySide6.QtCore import QEvent, QObject
+    from PySide6.QtWidgets import QWidget
+
+    path = default_data_dir() / "ui-trace.log" if setting in ("1", "") else Path(setting)
+
+    class _Watch(QObject):
+        def eventFilter(self, obj, event) -> bool:  # noqa: N802 (Qt name)
+            if event.type() == QEvent.Type.Show and isinstance(obj, QWidget) and obj.isWindow():
+                try:
+                    with path.open("a", encoding="utf-8") as fh:
+                        fh.write(
+                            f"{strftime('%H:%M:%S')} show {obj.__class__.__name__} "
+                            f"{obj.geometry().getRect()} parent={obj.parent() is not None} "
+                            f"name={obj.objectName()!r}\n"
+                        )
+                except OSError:
+                    pass
+            return False
+
+    watcher = _Watch()
+    app._ui_trace = watcher  # keep the filter alive for the app's lifetime
+    app.installEventFilter(watcher)
+
+
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     if sys.platform == "win32":
@@ -64,6 +101,7 @@ def main(argv: list[str] | None = None) -> int:
     app.setOrganizationName("Delta")
     app.setWindowIcon(make_icon())
     theme.apply(app)
+    _install_trace(app)
 
     data_dir = Path(args.data) if args.data else default_data_dir()
     store = Store(data_dir)

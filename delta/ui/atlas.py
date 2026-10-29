@@ -47,6 +47,7 @@ X_MIN, X_MAX = 8.0, 260.0
 ZOOM_STEP = 1.1
 DRAG_PX = 6.0           # past this a press becomes a drag, not a click
 MM_MIN = 56.0
+MM_CHIP = 24.0
 MM_W, MM_H = 76.0, 104.0
 SNAP_PX = 12.0
 
@@ -136,6 +137,7 @@ class AtlasView(QWidget):
         self._overflow = QPointF(0.0, 0.0)
         self._settings: dict | None = None
         self._minimap: dict | None = None
+        self._mini_open = True
         self._drag: str | None = None
         self._drag_start = None
         self._follow = True
@@ -258,6 +260,7 @@ class AtlasView(QWidget):
         mini = settings.get("atlas_minimap")
         if isinstance(mini, dict):
             self._minimap = {k: float(mini.get(k, 0.0)) for k in ("x", "y", "w", "h")}
+        self._mini_open = bool(settings.get("atlas_minimap_open", True))
 
     def _persist(self) -> None:
         if self._settings is None:
@@ -268,6 +271,14 @@ class AtlasView(QWidget):
         }
         if self._minimap is not None:
             self._settings["atlas_minimap"] = {k: round(v, 1) for k, v in self._minimap.items()}
+        self._settings["atlas_minimap_open"] = self._mini_open
+
+    def set_minimap_open(self, open_: bool) -> None:
+        if self._mini_open == open_:
+            return
+        self._mini_open = open_
+        self._persist()
+        self.update()
 
     def _zoom(self, factor: float) -> None:
         """Scale every pinned axis; fitted axes have nothing to scale."""
@@ -334,6 +345,9 @@ class AtlasView(QWidget):
         box["h"] = max(MM_MIN, min(float(box["h"]), plot.height() - 8.0))
         box["x"] = max(plot.left(), min(float(box["x"]), plot.right() - box["w"]))
         box["y"] = max(plot.top(), min(float(box["y"]), plot.bottom() - box["h"]))
+        if not self._mini_open:
+            # collapsed: a small square hanging off the same top-right anchor
+            return QRectF(box["x"] + box["w"] - MM_CHIP, box["y"], MM_CHIP, MM_CHIP)
         return QRectF(box["x"], box["y"], box["w"], box["h"])
 
     def _mini_fit(self, box: QRectF) -> tuple[float, float, float]:
@@ -360,8 +374,12 @@ class AtlasView(QWidget):
         if self._overflow.x() <= 0.5 and self._overflow.y() <= 0.5:
             return None
         box = self.minimap_rect()
+        if not self._mini_open:
+            return "chip" if box.contains(pos) else None
         if not box.contains(pos):
             return None
+        if pos.x() < box.left() + 13.0 and pos.y() < box.top() + 13.0:
+            return "collapse"
         if pos.x() > box.right() - 15.0 and pos.y() < box.top() + 15.0:
             return "move"
         if pos.x() < box.left() + 13.0 and pos.y() > box.bottom() - 13.0:
@@ -411,6 +429,12 @@ class AtlasView(QWidget):
             return
         pos = event.position()
         zone = self.minimap_zone(pos)
+        if zone == "chip":
+            self.set_minimap_open(True)
+            return
+        if zone == "collapse":
+            self.set_minimap_open(False)
+            return
         if zone is not None:
             self._drag = "mm_" + zone
             self._drag_start = {"pos": pos, "box": dict(self._minimap or {})}
@@ -484,6 +508,8 @@ class AtlasView(QWidget):
             shape = Qt.CursorShape.SizeAllCursor
         elif zone == "resize":
             shape = Qt.CursorShape.SizeFDiagCursor
+        elif zone in ("chip", "collapse"):
+            shape = Qt.CursorShape.PointingHandCursor
         elif zone is not None:
             shape = Qt.CursorShape.OpenHandCursor
         elif ruler == "y":
@@ -661,10 +687,25 @@ class AtlasView(QWidget):
 
     def _draw_minimap(self, p: QPainter) -> None:
         box = self.minimap_rect()
+        if not self._mini_open:
+            p.setPen(QPen(color(C.line_hi, 235), 1))
+            p.setBrush(color(C.bg, 236))
+            p.drawRect(box)
+            p.setPen(Qt.PenStyle.NoPen)
+            p.setBrush(color(C.brass, 220))
+            for fx, fy in ((0.3, 0.32), (0.5, 0.56), (0.7, 0.78)):
+                p.drawEllipse(QPointF(box.left() + box.width() * fx, box.top() + box.height() * fy), 1.5, 1.5)
+            p.setPen(QPen(color(C.ink_dim, 210), 1.2))
+            p.drawLine(QPointF(box.left() + 5, box.top() + 5), QPointF(box.left() + 10, box.top() + 5))
+            return
         k, ox, oy = self._mini_fit(box)
         p.setPen(QPen(color(C.line_hi, 235), 1))
         p.setBrush(color(C.bg, 236))
         p.drawRect(box)
+
+        # collapse handle: a short bar in the top-left corner, the only free one
+        p.setPen(QPen(color(C.ink_dim, 200), 1.2))
+        p.drawLine(QPointF(box.left() + 4, box.top() + 7), QPointF(box.left() + 10, box.top() + 7))
 
         convo = self.convo
         if convo is not None:
