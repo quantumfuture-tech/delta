@@ -424,6 +424,20 @@ class SlotRun:
     read: list[str] = field(default_factory=list)
 
 
+def rewrite_with_feedback(feedback: str) -> str:
+    """The user's rewrite instruction, framed as a task and not as chat.
+
+    Sent as the last user turn, so the model edits the answer above it instead
+    of answering the opinion conversationally (it used to start with "当然有呀…"
+    and only then produce the rewrite).
+    """
+    return (
+        "按下面的意见改写你上一条回答原文。只输出改写后的正文：\n"
+        "不要开场白、不要「好嘞」、不要解释、不要复述意见。\n\n"
+        "意见：" + feedback.strip()
+    )
+
+
 def _messages_after(
     convo: Conversation,
     mode: str,
@@ -449,7 +463,7 @@ def _messages_after(
             base = convo.nodes.get(base_id) if base_id else None
             if base is not None and base.text.strip():
                 msgs.append({"role": "assistant", "content": base.text})
-            msgs.append({"role": "user", "content": feedback})
+            msgs.append({"role": "user", "content": rewrite_with_feedback(feedback)})
         return msgs
     return []
 

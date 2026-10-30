@@ -624,11 +624,31 @@ def test_rewrite_answer_with_feedback_reads_the_base_but_not_its_descendants():
     key = slots.SlotKey(u1.id, b1.id)
     store, draft = draft_for(c, key, slots.REWRITE_ANSWER, "make it shorter")
     run = slots.execute_slot(c, key, draft)
-    assert [m["content"] for m in run.messages] == ["根问题", "A1", "Q1", "B1", "make it shorter"]
+    assert [m["content"] for m in run.messages] == [
+        "根问题",
+        "A1",
+        "Q1",
+        "B1",
+        slots.rewrite_with_feedback("make it shorter"),
+    ]
     assert run.read == [u0.id, a1.id, u1.id, b1.id]
     assert run.base_id == b1.id
     assert c.nodes[b1.id].text == "B1"
     assert run.assistant_id != b1.id
+
+
+def test_rewrite_feedback_is_framed_as_a_task_not_chat():
+    """The opinion must arrive as an instruction, or the model answers it.
+
+    It used to be appended bare ("换成牛逼版"), so the reply opened with small
+    talk and only then produced the rewrite.
+    """
+    framed = slots.rewrite_with_feedback("换成牛逼版")
+    assert framed.startswith("按下面的意见改写你上一条回答原文。只输出改写后的正文：")
+    assert "不要开场白" in framed
+    assert framed.endswith("意见：换成牛逼版")
+    # braces in the opinion must survive: no str.format anywhere
+    assert "改成 {x}" in slots.rewrite_with_feedback("改成 {x}")
 
 
 def test_edit_answer_is_a_single_non_model_write():

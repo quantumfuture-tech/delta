@@ -498,7 +498,8 @@ def test_rewrite_with_feedback_reads_base(qapp, window):
     window._send("shorter")
     assert wait_idle(qapp, window)
     contents = [m["content"] for m in window.client.calls[-1]]
-    assert "B1" in contents and "shorter" in contents
+    assert "B1" in contents
+    assert contents[-1] == slots.rewrite_with_feedback("shorter")
     assert c.view()[-1].text == "short"
 
 
